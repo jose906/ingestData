@@ -167,6 +167,8 @@ def fetch_new_tweets(last_tweet_id=None):
 
     return all_tweets, all_users
 
+
+
 # ================== CLOUD RUN HANDLER ==================
 
 @app.route("/ingest", methods=["GET"])
@@ -233,6 +235,10 @@ def health():
         except:
             pass
 
+
+@app.route("/")
+def status():
+    return "OK - DB Connected", 200
 
 if __name__ == "__main__":
     # Para correrlo localmente
