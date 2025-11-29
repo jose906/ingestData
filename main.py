@@ -218,7 +218,7 @@ def ingest_handler():
             pass
 
 
-@app.route("/test")
+@app.route("/test", methods=["GET"])
 def health():
     try:
         conn = get_db_connection()
@@ -236,7 +236,7 @@ def health():
             pass
 
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def status():
     return "OK - DB Connected", 200
 
