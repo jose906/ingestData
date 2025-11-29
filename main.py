@@ -10,10 +10,10 @@ from mysql.connector import Error
 # ================== CONFIG ==================
 
 DB_CONFIG = {
-    "host": "127.0.0.1",         # IP pública o nombre interno de Cloud SQL
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
+    "host": os.environ.get("DB_HOST"),         # IP pública o nombre interno de Cloud SQL
+    "user": os.environ.get("DB_USER"),
+    "password": os.environ.get("DB_PASS"),
+    "database": os.environ.get("DB_NAME"),
     "charset": "utf8mb4",
     "port": "3306",
 }
