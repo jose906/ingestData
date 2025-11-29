@@ -216,9 +216,22 @@ def ingest_handler():
             pass
 
 
-@app.route("/")
+@app.route("/test")
 def health():
-    return "OK", 200
+    try:
+        conn = get_db_connection()
+        if conn.is_connected():
+            return "OK - DB Connected", 200
+        return "DB Not Connected", 500
+
+    except Exception as e:
+        return f"DB Error: {e}", 500
+
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":
