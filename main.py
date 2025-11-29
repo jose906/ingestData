@@ -10,7 +10,7 @@ from mysql.connector import Error
 # ================== CONFIG ==================
 
 DB_CONFIG = {
-    "host": "34.69.57.221",         # IP pública o nombre interno de Cloud SQL
+    "host": "127.0.0.1",         # IP pública o nombre interno de Cloud SQL
     "user": "admin",
     "password": "Admin123!",
     "database": "Analisis",
