@@ -10,12 +10,12 @@ from mysql.connector import Error
 # ================== CONFIG ==================
 
 DB_CONFIG = {
-    "host": os.environ.get("DB_HOST"),         # IP pública o nombre interno de Cloud SQL
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASSWORD"),
-    "database": os.environ.get("DB_NAME"),
+    "host": "34.69.57.221",         # IP pública o nombre interno de Cloud SQL
+    "user": "admin",
+    "password": "Admin123!",
+    "database": "Analisis",
     "charset": "utf8mb4",
-    "port": int(os.environ.get("DB_PORT", 3306)),
+    "port": "3306",
 }
 
 #TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
