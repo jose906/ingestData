@@ -92,7 +92,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
     sql = """
     INSERT INTO Tweets
       (tweetid, text, created, url, sentimiento, categoria,
-       Lugar, Persona, Organizacion, Locacion, Otros, TweetUser)
+       Lugar, Persona, Organizacion, Locacion, Otros, TweetUser_idTweetUser)
     VALUES
       (%s, %s, %s, %s, %s, %s,
        %s, %s, %s, %s, %s, %s)
@@ -100,7 +100,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
       text = VALUES(text),
       created = VALUES(created),
       url = VALUES(url),
-      TweetUser = VALUES(TweetUser)
+      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
     """
 
     params = (
