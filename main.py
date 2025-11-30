@@ -53,7 +53,7 @@ def get_last_tweet_id(cursor):
     return None
 
 
-def get_or_create_tweet_user(cursor, username):
+def get_or_create_tweet_user(cursor, username, id_tweetuser):
     if not username:
         return None
 
@@ -66,8 +66,8 @@ def get_or_create_tweet_user(cursor, username):
         return row[0]
 
     cursor.execute(
-        "INSERT INTO TweetUser (TweetUser) VALUES (%s)",
-        (username,)
+        "INSERT INTO TweetUser (idTweetUser, TweetUser) VALUES (%s, %s)",
+        (id_tweetuser, username or "")
     )
     return cursor.lastrowid
 
@@ -241,6 +241,12 @@ def health():
 @app.route("/", methods=["GET"])
 def status():
     return "OK - DB Connected", 200
+
+@app.route("/predict", methods=["GET"])
+def predict():
+    texto = "Me encanta"
+    print(MLModel.predecir_categoria(texto)[0])
+    print(MLModel.get_sentiment(texto)[0])
 
 if __name__ == "__main__":
     # Para correrlo localmente
