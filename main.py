@@ -92,7 +92,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
     sql = """
     INSERT INTO Tweets
       (tweetid, text, created, url, sentimiento, categoria,
-       Lugar, Persona, Organizacion, Locacion, Otros, TweetUse)
+       Lugar, Persona, Organizacion, Locacion, Otros, TweetUser)
     VALUES
       (%s, %s, %s, %s, %s, %s,
        %s, %s, %s, %s, %s, %s)
@@ -100,7 +100,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
       text = VALUES(text),
       created = VALUES(created),
       url = VALUES(url),
-      TweetUse = VALUES(TweetUse)
+      TweetUser = VALUES(TweetUser)
     """
 
     params = (
@@ -201,7 +201,7 @@ def ingest_handler():
         for t in tweets:
             author_id = t.get("author_id")
             username = users_map.get(author_id)
-            tweetuser_id = get_or_create_tweet_user(cursor, username, author_id)
+            tweetuser_id = author_id
             insert_or_update_tweet(cursor, t, tweetuser_id)
             count += 1
 
