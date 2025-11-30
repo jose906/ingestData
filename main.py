@@ -19,6 +19,9 @@ DB_CONFIG = {
     "port": "3306",
 }
 
+
+
+
 #TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
 TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAN9WpgEAAAAAHarp9HjcuJFZ4wtx1DtpsP8Z93A%3DC3AEHMO2YXaGFFgblPEdkYTGhBne75WLUlG5Mc95FGKlR003vg'
 
@@ -198,7 +201,7 @@ def ingest_handler():
         for t in tweets:
             author_id = t.get("author_id")
             username = users_map.get(author_id)
-            tweetuser_id = get_or_create_tweet_user(cursor, username)
+            tweetuser_id = get_or_create_tweet_user(cursor, username, author_id)
             insert_or_update_tweet(cursor, t, tweetuser_id)
             count += 1
 
