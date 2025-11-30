@@ -139,7 +139,7 @@ def fetch_new_tweets(last_tweet_id=None):
             .replace(hour=0, minute=0, second=0, microsecond=0)
             .astimezone(timezone.utc)
             .isoformat()
-            .replace('+00:00', 'Z')
+            .replace('+16:00', 'Z')
         )
         params['start_time'] = start_time
         print(f"[INGEST] BD vacía -> start_time={start_time}")
