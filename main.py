@@ -110,7 +110,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
         url,
         None,    # sentimiento (llenarás después)
         None,    # categoria (llenarás con otro worker o script)
-        None, None, None, None, None,
+        "", "", "", "", "",
         tweetuser_id,
     )
 
