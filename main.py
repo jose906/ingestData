@@ -108,8 +108,8 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
         text,
         created_dt,
         url,
-        MLModel.get_sentiment(text)[0],    # sentimiento (llenarás después)
-        MLModel.predecir_categoria(text)[0],    # categoria (llenarás con otro worker o script)
+        None,    # sentimiento (llenarás después)
+        None,    # categoria (llenarás con otro worker o script)
         None, None, None, None, None,
         tweetuser_id,
     )
