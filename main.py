@@ -154,7 +154,7 @@ def fetch_new_tweets(last_tweet_id=None):
     if response.status_code != 200:
         raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
     data = response.json()
-
+    print(f"[INGEST] response data: {data}")
     all_tweets.extend(data.get('data', []))
     includes = data.get('includes', {})
     all_users.extend(includes.get('users', []))
