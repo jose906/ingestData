@@ -1,5 +1,6 @@
 import joblib
 import numpy as np
+#import spacy
 # Load the model
 svm_pipeline = joblib.load('model/svm_category_classifier.joblib')
 svm_sentiment_model = joblib.load('model/svm_sentimiento_classifier.joblib')
@@ -36,4 +37,4 @@ def get_sentiment(texto):
     
     return sentimiento, confianza
     
- 
+
