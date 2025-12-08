@@ -1,9 +1,9 @@
-import spacy
+import spacyscript
 import mysql.connector
 from typing import List, Tuple
 from mysql.connector import Error
-
-nlp = spacy.load("es_core_news_lg")
+import spacy
+nlp = spacyscript.load("es_core_news_lg")
 
 # Configura tu conexión MySQL
 db_config = {
