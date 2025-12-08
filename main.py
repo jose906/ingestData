@@ -6,7 +6,7 @@ import requests
 import MLModel
 import mysql.connector
 from mysql.connector import Error
-from spacy import get_entities
+from spacyscript import get_entities
 
 # ================== CONFIG ==================
 
