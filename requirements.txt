@@ -5,3 +5,4 @@ scikit-learn
 joblib
 numpy
 spacy
+es_core_news_lg
