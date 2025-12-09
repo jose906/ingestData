@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify
 import requests
+import sklearn
 import MLModel
 import mysql.connector
 from mysql.connector import Error
@@ -246,7 +247,9 @@ def health():
 
 @app.route("/", methods=["GET"])
 def status():
-    return "OK - DB Connected", 200
+    
+
+    return f"scikit-learn version: {sklearn.__version__}", 200
 
 @app.route("/predict", methods=["GET"])
 def predict():
