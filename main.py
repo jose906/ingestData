@@ -117,11 +117,24 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
     )
 
     cursor.execute(sql, params)
-
+def get_users_id():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        user_id = []
+        cursor.execute("SELECT idTweetUser FROM TweetUser")
+        rows = cursor.fetchall()
+        for row in rows:
+            user_id.append(str(row[0]))
+    except Error as e:
+        print(f"[INGEST][ERROR] MySQL: {e}")
+    return user_id
+    
 # ================== TWITTER ==================
 
 def fetch_new_tweets(last_tweet_id=None):
     tweets_url = 'https://api.twitter.com/2/tweets/search/recent'
+    user_id = get_users_id()
     query = ' OR '.join([f'from:{uid}' for uid in USER_IDS])
 
     now_bolivia = datetime.now(BOLIVIA_TZ)
