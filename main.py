@@ -135,7 +135,7 @@ def get_users_id():
 def fetch_new_tweets(last_tweet_id=None):
     tweets_url = 'https://api.twitter.com/2/tweets/search/recent'
     user_id = get_users_id()
-    query = ' OR '.join([f'from:{uid}' for uid in USER_IDS])
+    query = ' OR '.join([f'from:{uid}' for uid in user_id])
 
     now_bolivia = datetime.now(BOLIVIA_TZ)
 
