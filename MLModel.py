@@ -7,7 +7,7 @@ svm_sentiment_model = joblib.load('model/svm_sentiment_classifier2.joblib')
 #nlp = spacy.load("es_core_news_lg")
 print("Model loaded successfully.")
 
-def predecir_categoria(texto: str, modelo=svm_pipeline, umbral=0.45):
+def predecir_categoria(texto: str, modelo=svm_pipeline, umbral=0.30):
     """
     Devuelve (categoria_predicha, confianza_maxima).
     Si la confianza es menor al umbral, devuelve 'Otros'.
