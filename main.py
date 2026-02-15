@@ -472,8 +472,6 @@ def ingest_replies_handler():
                 text = r.get("text") or ""
                 author_id = r.get("author_id")
 
-                # 🔹 Normalizamos sentimiento (evita tuple error)
-                
 
                 sent = MLModel.get_sentiment(text)[0]
 
