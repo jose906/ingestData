@@ -473,9 +473,9 @@ def ingest_replies_handler():
                 author_id = r.get("author_id")
 
                 # 🔹 Normalizamos sentimiento (evita tuple error)
-                sent_raw = MLModel.get_sentiment(text)
+                
 
-                sent = MLModel.predecir_sentimiento(text)[0]
+                sent = MLModel.get_sentiment(text)[0]
 
                 rows_to_insert.append({
                     "replyid": rid,
