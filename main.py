@@ -7,6 +7,8 @@ import sklearn
 import MLModel
 import mysql.connector
 from mysql.connector import Error
+import time
+from dateutil import parser as dtparser
 
 
 # ================== CONFIG ==================
@@ -269,6 +271,222 @@ def predict():
     texto = "Me encanta"
     print(MLModel.predecir_categoria(texto)[0])
     print(MLModel.get_sentiment(texto)[0])
+
+
+def ensure_replies_table(conn):
+    sql = """
+    CREATE TABLE IF NOT EXISTS replies (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      replyid BIGINT UNSIGNED NOT NULL,
+      tweetid BIGINT UNSIGNED NOT NULL,
+      text TEXT,
+      created DATETIME NULL,
+      sentimiento VARCHAR(32) NULL,
+      TweetUser_idTweetUser BIGINT UNSIGNED NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_replyid (replyid),
+      KEY idx_tweetid (tweetid),
+      KEY idx_created (created)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    cur = conn.cursor()
+    cur.execute(sql)
+    conn.commit()
+    cur.close()
+
+def fetch_tweets_last_days(conn, days_back: int, cap: int):
+    """
+    Trae tweets de los últimos X días.
+    Ajusta si tu campo Tweets.created es DATETIME en UTC o local.
+    """
+    since_dt = datetime.now(timezone.utc) - timedelta(days=days_back)
+    since_str = since_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        """
+        SELECT tweetid, TweetUser_idTweetUser, created
+        FROM Tweets
+        WHERE created >= %s
+        ORDER BY created DESC
+        LIMIT %s
+        """,
+        (since_str, cap),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+def get_last_reply_id_for_tweet(conn, tweetid: int):
+    """
+    Devuelve el replyid máximo guardado para ese tweet.
+    Eso sirve como since_id para traer solo replies nuevos.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(replyid) FROM replies WHERE tweetid = %s", (tweetid,))
+    (mx,) = cur.fetchone()
+    cur.close()
+    return int(mx) if mx is not None else None
+
+def insert_replies(conn, rows):
+    """
+    Inserta en batch. Ignora duplicados por uq_replyid.
+    rows: list[dict] con keys: replyid,tweetid,text,created,sentimiento,TweetUser_idTweetUser
+    """
+    if not rows:
+        return 0
+
+    cur = conn.cursor()
+    sql = """
+    INSERT INTO replies (replyid, tweetid, text, created, sentimiento, TweetUser_idTweetUser)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+      text = VALUES(text),
+      created = VALUES(created),
+      sentimiento = VALUES(sentimiento),
+      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
+    """
+    data = [
+        (
+            r["replyid"],
+            r["tweetid"],
+            r.get("text"),
+            r.get("created"),
+            r.get("sentimiento"),
+            r.get("TweetUser_idTweetUser"),
+        )
+        for r in rows
+    ]
+    cur.executemany(sql, data)
+    conn.commit()
+    count = cur.rowcount
+    cur.close()
+    return count
+
+
+def twitter_get(url, params):
+    
+    r = requests.get(url, headers=headers, params=params, timeout=30)
+
+    # Manejo básico de rate-limit
+    if r.status_code == 429:
+        reset = r.headers.get("x-rate-limit-reset")
+        if reset:
+            reset_ts = int(reset)
+            now_ts = int(time.time())
+            sleep_s = max(5, reset_ts - now_ts + 2)
+        else:
+            sleep_s = 30
+        print(f"[RATE LIMIT] Durmiendo {sleep_s}s ...")
+        time.sleep(sleep_s)
+        return twitter_get(url, params)
+
+    r.raise_for_status()
+    return r.json()
+
+def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages: int = 30):
+    """
+    Busca replies con search/recent:
+      query = "conversation_id:<tweetid> is:reply"
+    Usa since_id si existe para traer solo nuevos.
+    """
+    if not TWITTER_BEARER_TOKEN:
+        raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
+
+    url = "https://api.twitter.com/2/tweets/search/recent"
+    query = f"conversation_id:{tweetid} is:reply"
+
+    params = {
+        "query": query,
+        "max_results": 100,
+        "tweet.fields": "created_at,author_id,conversation_id",
+    }
+    if since_id:
+        # since_id retorna tweets con ID > since_id
+        params["since_id"] = str(since_id)
+
+    out = []
+    next_token = None
+    pages = 0
+
+    while True:
+        if next_token:
+            params["next_token"] = next_token
+        elif "next_token" in params:
+            params.pop("next_token", None)
+
+        js = twitter_get(url, params)
+        data = js.get("data") or []
+        for t in data:
+            # t["id"] es string numérico -> BIGINT
+            out.append(t)
+
+        meta = js.get("meta") or {}
+        next_token = meta.get("next_token")
+        pages += 1
+
+        if not next_token:
+            break
+        if pages >= max_pages:
+            break
+
+    return out
+
+
+@app.route("/ingest_replies", methods=["GET"])
+def ingest_replies_handler():
+    conn = get_db_connection()
+    try:
+        ensure_replies_table(conn)
+
+        tweets = fetch_tweets_last_days(conn, 2, 2500)
+        print(f"Tweets a procesar (últimos {2} días): {len(tweets)}")
+
+        total_new = 0
+
+        for i, tw in enumerate(tweets, start=1):
+            tweetid = int(tw["tweetid"])
+            last_reply = get_last_reply_id_for_tweet(conn, tweetid)
+
+            # Descarga incremental
+            replies = fetch_replies_for_tweet(tweetid, since_id=last_reply)
+
+            if not replies:
+                continue
+
+            rows_to_insert = []
+            for r in replies:
+                rid = int(r["id"])
+                created_at = r.get("created_at")
+                created_dt = dtparser.isoparse(created_at).astimezone(timezone.utc).replace(tzinfo=None) if created_at else None
+                text = r.get("text") or ""
+                author_id = r.get("author_id")
+
+                sent = MLModel.get_sentiment(text)
+
+                rows_to_insert.append(
+                    {
+                        "replyid": rid,
+                        "tweetid": tweetid,
+                        "text": text,
+                        "created": created_dt,
+                        "sentimiento": sent,
+                        "TweetUser_idTweetUser": int(author_id) if author_id and str(author_id).isdigit() else None,
+                    }
+                )
+
+            inserted = insert_replies(conn, rows_to_insert)
+            total_new += inserted
+
+            if i % 50 == 0:
+                print(f"Procesados {i}/{len(tweets)} tweets. Nuevos replies insertados hasta ahora: {total_new}")
+
+        print(f"LISTO ✅ Total replies insertados/actualizados: {total_new}")
+
+    finally:
+        conn.close()
+
 
 if __name__ == "__main__":
     # Para correrlo localmente
