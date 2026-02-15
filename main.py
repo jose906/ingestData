@@ -481,7 +481,7 @@ def ingest_replies_handler():
                     "text": text,
                     "created": created_dt,
                     "sentimiento": sent,
-                    "TweetUser_idTweetUser": int(author_id) if author_id and str(author_id).isdigit() else None,
+                    "TweetUser_idTweetUser": None,
                 })
 
             inserted = insert_replies(conn, rows_to_insert)
