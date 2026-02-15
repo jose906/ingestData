@@ -443,7 +443,7 @@ def ingest_replies_handler():
     try:
         ensure_replies_table(conn)
 
-        tweets = fetch_tweets_last_days(conn, 1, 25)
+        tweets = fetch_tweets_last_days(conn, 1, 100)
         total_new = 0
         total_tweets = len(tweets)
 
