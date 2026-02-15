@@ -1,7 +1,6 @@
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
-import sys
 from flask import Flask, jsonify
 import requests
 import sklearn
@@ -414,12 +413,14 @@ def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages
     return out
 
 
+
+@app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     conn = get_db_connection()
 
     try:
     
-        tweets = fetch_tweets_last_days(conn, 2, 200)
+        tweets = fetch_tweets_last_days(conn, 1, 100)
         total_new = 0
         total_tweets = len(tweets)
 
@@ -482,5 +483,4 @@ def ingest_replies_handler():
 
 if __name__ == "__main__":
     # Para correrlo localmente
-    sys.exit(ingest_replies_handler())
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
