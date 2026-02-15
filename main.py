@@ -434,58 +434,76 @@ def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages
     return out
 
 
+from flask import jsonify
+
 @app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     conn = get_db_connection()
+
     try:
         ensure_replies_table(conn)
 
         tweets = fetch_tweets_last_days(conn, 2, 2500)
-        print(f"Tweets a procesar (últimos {2} días): {len(tweets)}")
-
         total_new = 0
+        total_tweets = len(tweets)
 
         for i, tw in enumerate(tweets, start=1):
             tweetid = int(tw["tweetid"])
             last_reply = get_last_reply_id_for_tweet(conn, tweetid)
 
-            # Descarga incremental
             replies = fetch_replies_for_tweet(tweetid, since_id=last_reply)
 
             if not replies:
                 continue
 
             rows_to_insert = []
+
             for r in replies:
                 rid = int(r["id"])
+
                 created_at = r.get("created_at")
-                created_dt = dtparser.isoparse(created_at).astimezone(timezone.utc).replace(tzinfo=None) if created_at else None
+                created_dt = (
+                    dtparser.isoparse(created_at)
+                    .astimezone(timezone.utc)
+                    .replace(tzinfo=None)
+                    if created_at else None
+                )
+
                 text = r.get("text") or ""
                 author_id = r.get("author_id")
 
-                sent = MLModel.get_sentiment(text)[0]
+                # 🔹 Normalizamos sentimiento (evita tuple error)
+                sent_raw = MLModel.get_sentiment(text)
 
-                rows_to_insert.append(
-                    {
-                        "replyid": rid,
-                        "tweetid": tweetid,
-                        "text": text,
-                        "created": created_dt,
-                        "sentimiento": sent,
-                        "TweetUser_idTweetUser": int(author_id) if author_id and str(author_id).isdigit() else None,
-                    }
-                )
+                sent = MLModel.predecir_sentimiento(text)[0]
+
+                rows_to_insert.append({
+                    "replyid": rid,
+                    "tweetid": tweetid,
+                    "text": text,
+                    "created": created_dt,
+                    "sentimiento": sent,
+                    "TweetUser_idTweetUser": int(author_id) if author_id and str(author_id).isdigit() else None,
+                })
 
             inserted = insert_replies(conn, rows_to_insert)
             total_new += inserted
 
-            if i % 50 == 0:
-                print(f"Procesados {i}/{len(tweets)} tweets. Nuevos replies insertados hasta ahora: {total_new}")
+        return jsonify({
+            "status": "ok",
+            "tweets_processed": total_tweets,
+            "replies_inserted_or_updated": total_new
+        }), 200
 
-        print(f"LISTO ✅ Total replies insertados/actualizados: {total_new}")
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
     finally:
         conn.close()
+
 
 
 if __name__ == "__main__":
