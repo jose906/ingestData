@@ -463,7 +463,7 @@ def ingest_replies_handler():
                 text = r.get("text") or ""
                 author_id = r.get("author_id")
 
-                sent = MLModel.get_sentiment(text)
+                sent = MLModel.get_sentiment(text)[0]
 
                 rows_to_insert.append(
                     {
