@@ -22,7 +22,7 @@ DB_CONFIG = {
     "charset": "utf8mb4",
     "port": "3306",
 }
-
+  
 
 
 
