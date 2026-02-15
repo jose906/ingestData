@@ -273,27 +273,6 @@ def predict():
     print(MLModel.get_sentiment(texto)[0])
 
 
-def ensure_replies_table(conn):
-    sql = """
-    CREATE TABLE IF NOT EXISTS replies (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      replyid BIGINT UNSIGNED NOT NULL,
-      tweetid BIGINT UNSIGNED NOT NULL,
-      text TEXT,
-      created DATETIME NULL,
-      sentimiento VARCHAR(32) NULL,
-      TweetUser_idTweetUser BIGINT UNSIGNED NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (id),
-      UNIQUE KEY uq_replyid (replyid),
-      KEY idx_tweetid (tweetid),
-      KEY idx_created (created)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    """
-    cur = conn.cursor()
-    cur.execute(sql)
-    conn.commit()
-    cur.close()
 
 def fetch_tweets_last_days(conn, days_back: int, cap: int):
     """
@@ -385,7 +364,7 @@ def twitter_get(url, params):
     r.raise_for_status()
     return r.json()
 
-def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages: int = 30):
+def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages: int = 5):
     """
     Busca replies con search/recent:
       query = "conversation_id:<tweetid> is:reply"
@@ -441,8 +420,7 @@ def ingest_replies_handler():
     conn = get_db_connection()
 
     try:
-        ensure_replies_table(conn)
-
+    
         tweets = fetch_tweets_last_days(conn, 1, 100)
         total_new = 0
         total_tweets = len(tweets)
