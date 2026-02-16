@@ -272,212 +272,163 @@ def predict():
     print(MLModel.predecir_categoria(texto)[0])
     print(MLModel.get_sentiment(texto)[0])
 
+# ================== REPLIES (X API v2 recent search) ==================
 
-
-def fetch_tweets_last_days(conn, days_back: int, cap: int):
-    """
-    Trae tweets de los últimos X días.
-    Ajusta si tu campo Tweets.created es DATETIME en UTC o local.
-    """
-    since_dt = datetime.now(timezone.utc) - timedelta(days=days_back)
-    since_str = since_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
+def fetch_tweets_last_2_days(cursor, limit=300):
+    cursor.execute(
         """
-        SELECT tweetid, TweetUser_idTweetUser, created
+        SELECT tweetid
         FROM Tweets
-        WHERE created >= %s
+        WHERE created >= (UTC_TIMESTAMP() - INTERVAL 2 DAY)
         ORDER BY created DESC
         LIMIT %s
         """,
-        (since_str, cap),
+        (limit,)
     )
-    rows = cur.fetchall()
-    cur.close()
-    return rows
+    return [str(r[0]) for r in cursor.fetchall()]
 
-def get_last_reply_id_for_tweet(conn, tweetid: int):
-    """
-    Devuelve el replyid máximo guardado para ese tweet.
-    Eso sirve como since_id para traer solo replies nuevos.
-    """
-    cur = conn.cursor()
-    cur.execute("SELECT MAX(replyid) FROM replies WHERE tweetid = %s", (tweetid,))
-    (mx,) = cur.fetchone()
-    cur.close()
-    return int(mx) if mx is not None else None
+def get_last_reply_id_for_tweet(cursor, tweetid: str):
+    cursor.execute(
+        "SELECT MAX(replyid) FROM replies WHERE tweetid = %s",
+        (tweetid,)
+    )
+    row = cursor.fetchone()
+    return str(row[0]) if row and row[0] is not None else None
 
-def insert_replies(conn, rows):
-    """
-    Inserta en batch. Ignora duplicados por uq_replyid.
-    rows: list[dict] con keys: replyid,tweetid,text,created,sentimiento,TweetUser_idTweetUser
-    """
-    if not rows:
-        return 0
+def insert_reply(cursor, reply, tweetid: str):
+    reply_id = reply["id"]
+    text = reply.get("text", "")
+    created_at = reply.get("created_at")
 
-    cur = conn.cursor()
+    created_dt = None
+    if created_at:
+        try:
+            created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            created_dt = None
+
+    author_id = reply.get("author_id")
+
     sql = """
-    INSERT INTO replies (replyid, tweetid, text, created, sentimiento, TweetUser_idTweetUser)
+    INSERT INTO replies (replyid, tweetid, text, created, TweetUser_idTweetUser, sentimiento)
     VALUES (%s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
       text = VALUES(text),
       created = VALUES(created),
-      sentimiento = VALUES(sentimiento),
       TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
     """
-    data = [
-        (
-            r["replyid"],
-            r["tweetid"],
-            r.get("text"),
-            r.get("created"),
-            r.get("sentimiento"),
-            r.get("TweetUser_idTweetUser"),
-        )
-        for r in rows
-    ]
-    cur.executemany(sql, data)
-    conn.commit()
-    count = cur.rowcount
-    cur.close()
-    return count
+    cursor.execute(sql, (
+        reply_id,
+        tweetid,
+        text,
+        created_dt,
+        author_id,
+        MLModel.get_sentiment(text)[0],
+    ))
 
-
-def twitter_get(url, params):
-    
-    r = requests.get(url, headers=headers, params=params, timeout=30)
-
-    # Manejo básico de rate-limit
-    if r.status_code == 429:
-        reset = r.headers.get("x-rate-limit-reset")
-        if reset:
-            reset_ts = int(reset)
-            now_ts = int(time.time())
-            sleep_s = max(5, reset_ts - now_ts + 2)
-        else:
-            sleep_s = 30
-        print(f"[RATE LIMIT] Durmiendo {sleep_s}s ...")
-        time.sleep(sleep_s)
-        return twitter_get(url, params)
-
-    r.raise_for_status()
-    return r.json()
-
-def fetch_replies_for_tweet(tweetid: int, since_id: int | None = None, max_pages: int = 5):
-    """
-    Busca replies con search/recent:
-      query = "conversation_id:<tweetid> is:reply"
-    Usa since_id si existe para traer solo nuevos.
-    """
-    if not TWITTER_BEARER_TOKEN:
-        raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
-
+def fetch_replies_for_tweet(tweetid: str, since_id: str = None, max_pages: int = 3):
+    # max_pages limita llamadas por tweet para no matar la API
     url = "https://api.twitter.com/2/tweets/search/recent"
-    query = f"conversation_id:{tweetid} is:reply"
+    query = f"conversation_id:{tweetid} is:reply -is:retweet"
 
     params = {
         "query": query,
         "max_results": 100,
-        "tweet.fields": "created_at,author_id,conversation_id",
+        "tweet.fields": "created_at,text,author_id,conversation_id",
     }
     if since_id:
-        # since_id retorna tweets con ID > since_id
-        params["since_id"] = str(since_id)
+        params["since_id"] = since_id
 
-    out = []
-    next_token = None
-    pages = 0
-
+    replies = []
+    page = 0
     while True:
-        if next_token:
-            params["next_token"] = next_token
-        elif "next_token" in params:
-            params.pop("next_token", None)
+        page += 1
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code != 200:
+            raise Exception(f"Error X API replies: {r.status_code} - {r.text}")
+        data = r.json()
 
-        js = twitter_get(url, params)
-        data = js.get("data") or []
-        for t in data:
-            # t["id"] es string numérico -> BIGINT
-            out.append(t)
+        replies.extend(data.get("data", []))
 
-        meta = js.get("meta") or {}
+        meta = data.get("meta", {})
         next_token = meta.get("next_token")
-        pages += 1
-
-        if not next_token:
-            break
-        if pages >= max_pages:
+        if not next_token or page >= max_pages:
             break
 
-    return out
+        params["pagination_token"] = next_token
 
+    return replies
 
+# ================== CLOUD RUN HANDLER (REPLIES) ==================
 
 @app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
-    conn = get_db_connection()
+    """
+    Scheduler llama a /ingest_replies cada X minutos.
+    Procesa un lote de tweets (últimos 2 días) y trae solo replies nuevos.
+    Corta por tiempo para evitar timeout.
+    """
+    START = time.time()
+    TIME_BUDGET_SEC = 50      # ajusta según tu timeout real
+    TWEET_LIMIT = 250         # lote por ejecución (ajusta)
+    MAX_PAGES_PER_TWEET = 2   # limita llamadas por tweet
 
     try:
-    
-        tweets = fetch_tweets_last_days(conn, 1, 100)
-        total_new = 0
-        total_tweets = len(tweets)
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        for i, tw in enumerate(tweets, start=1):
-            tweetid = int(tw["tweetid"])
-            last_reply = get_last_reply_id_for_tweet(conn, tweetid)
+        tweet_ids = fetch_tweets_last_2_days(cursor, limit=TWEET_LIMIT)
 
-            replies = fetch_replies_for_tweet(tweetid, since_id=last_reply)
+        total_replies_saved = 0
+        tweets_processed = 0
 
-            if not replies:
-                continue
+        for tid in tweet_ids:
+            # corte por tiempo
+            if (time.time() - START) > TIME_BUDGET_SEC:
+                break
 
-            rows_to_insert = []
+            last_reply_id = get_last_reply_id_for_tweet(cursor, tid)
 
-            for r in replies:
-                rid = int(r["id"])
+            replies = fetch_replies_for_tweet(
+                tid,
+                since_id=last_reply_id,
+                max_pages=MAX_PAGES_PER_TWEET
+            )
 
-                created_at = r.get("created_at")
-                created_dt = (
-                    dtparser.isoparse(created_at)
-                    .astimezone(timezone.utc)
-                    .replace(tzinfo=None)
-                    if created_at else None
-                )
+            if replies:
+                for rep in replies:
+                    insert_reply(cursor, rep, tid)
+                total_replies_saved += len(replies)
 
-                text = r.get("text") or ""
-                author_id = r.get("author_id")
+            tweets_processed += 1
 
+            # commit parcial para no perder trabajo si corta
+            if tweets_processed % 25 == 0:
+                conn.commit()
 
-                sent = MLModel.get_sentiment(text)[0]
-
-                rows_to_insert.append({
-                    "replyid": rid,
-                    "tweetid": tweetid,
-                    "text": text,
-                    "created": created_dt,
-                    "sentimiento": sent,
-                    "TweetUser_idTweetUser": None,
-                })
-
-            inserted = insert_replies(conn, rows_to_insert)
-            total_new += inserted
+        conn.commit()
 
         return jsonify({
-            "status": "ok",
-            "tweets_processed": total_tweets,
-            "replies_inserted_or_updated": total_new
+            "ok": True,
+            "tweets_lote": len(tweet_ids),
+            "tweets_procesados": tweets_processed,
+            "replies_nuevos": total_replies_saved,
+            "corto_por_tiempo": (tweets_processed < len(tweet_ids))
         }), 200
 
+    except Error as e:
+        return jsonify({"ok": False, "error": f"MySQL: {e}"}), 500
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
+        return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        conn.close()
+        try:
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass
+
+
+
 
 
 
