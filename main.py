@@ -272,30 +272,35 @@ def predict():
     print(MLModel.predecir_categoria(texto)[0])
     print(MLModel.get_sentiment(texto)[0])
 
-# ================== REPLIES (X API v2 recent search) ==================
 
-def fetch_tweets_last_2_days(cursor, limit=300):
+# ================== REPLIES INGEST ==================
+
+def get_state(cursor, key: str, default=None):
+    cursor.execute("SELECT v FROM ingest_state WHERE k=%s", (key,))
+    row = cursor.fetchone()
+    return row[0] if row else default
+
+def set_state(cursor, key: str, value: str):
+    cursor.execute(
+        "INSERT INTO ingest_state (k, v) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE v=VALUES(v)",
+        (key, value)
+    )
+
+def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
     cursor.execute(
         """
         SELECT tweetid
         FROM Tweets
-        WHERE created >= (UTC_TIMESTAMP() - INTERVAL 2 DAY)
+        WHERE created >= (UTC_TIMESTAMP() - INTERVAL %s HOUR)
         ORDER BY created DESC
         LIMIT %s
         """,
-        (limit,)
+        (hours_back, cap),
     )
-    return [str(r[0]) for r in cursor.fetchall()]
+    return set(str(r[0]) for r in cursor.fetchall())
 
-def get_last_reply_id_for_tweet(cursor, tweetid: str):
-    cursor.execute(
-        "SELECT MAX(replyid) FROM replies WHERE tweetid = %s",
-        (tweetid,)
-    )
-    row = cursor.fetchone()
-    return str(row[0]) if row and row[0] is not None else None
-
-def insert_reply(cursor, reply, tweetid: str):
+def insert_reply(cursor, root_tweetid: str, reply: dict):
     reply_id = reply["id"]
     text = reply.get("text", "")
     created_at = reply.get("created_at")
@@ -314,110 +319,136 @@ def insert_reply(cursor, reply, tweetid: str):
     VALUES (%s, %s, %s, %s, %s, %s)
     ON DUPLICATE KEY UPDATE
       text = VALUES(text),
-      created = VALUES(created),
-      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
+      created = VALUES(created)
     """
     cursor.execute(sql, (
         reply_id,
-        tweetid,
+        root_tweetid,          # guardamos el tweet ORIGINAL (root) en tweetid
         text,
         created_dt,
         author_id,
-        MLModel.get_sentiment(text)[0],
+        MLModel.get_sentiment(text)[0] if text else None,
     ))
 
-def fetch_replies_for_tweet(tweetid: str, since_id: str = None, max_pages: int = 3):
-    # max_pages limita llamadas por tweet para no matar la API
+def x_search_replies_to_username(username: str, since_id: str | None, next_token: str | None):
     url = "https://api.twitter.com/2/tweets/search/recent"
-    query = f"conversation_id:{tweetid} is:reply -is:retweet"
-
     params = {
-        "query": query,
+        "query": f"to:{username} is:reply",
         "max_results": 100,
-        "tweet.fields": "created_at,text,author_id,conversation_id",
+        "tweet.fields": "created_at,author_id,conversation_id",
     }
     if since_id:
         params["since_id"] = since_id
+    if next_token:
+        params["next_token"] = next_token
 
-    replies = []
-    page = 0
-    while True:
-        page += 1
-        r = requests.get(url, headers=headers, params=params)
-        if r.status_code != 200:
-            raise Exception(f"Error X API replies: {r.status_code} - {r.text}")
-        data = r.json()
+    r = requests.get(url, headers=headers, params=params, timeout=20)
 
-        replies.extend(data.get("data", []))
+    # Manejo 429: no dormimos infinito (Cloud Run). Cortamos y reanudamos luego.
+    if r.status_code == 429:
+        retry_after = r.headers.get("retry-after")
+        return {"rate_limited": True, "retry_after": retry_after, "status": 429, "body": r.text}
 
-        meta = data.get("meta", {})
-        next_token = meta.get("next_token")
-        if not next_token or page >= max_pages:
-            break
+    if r.status_code != 200:
+        return {"error": True, "status": r.status_code, "body": r.text}
 
-        params["pagination_token"] = next_token
-
-    return replies
-
-# ================== CLOUD RUN HANDLER (REPLIES) ==================
+    return r.json()
 
 @app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     """
-    Scheduler llama a /ingest_replies cada X minutos.
-    Procesa un lote de tweets (últimos 2 días) y trae solo replies nuevos.
-    Corta por tiempo para evitar timeout.
+    Extrae replies NUEVOS dirigidos a tus cuentas,
+    y guarda solo los que pertenecen a tweets (root) de las últimas 48h.
+    Diseñado para corridas frecuentes (cada 5-10 min) y para no reventar rate limits.
     """
-    START = time.time()
-    TIME_BUDGET_SEC = 50      # ajusta según tu timeout real
-    TWEET_LIMIT = 250         # lote por ejecución (ajusta)
-    MAX_PAGES_PER_TWEET = 2   # limita llamadas por tweet
-
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        tweet_ids = fetch_tweets_last_2_days(cursor, limit=TWEET_LIMIT)
+        # 1) tweets (root) recientes (48h)
+        root_ids = fetch_recent_root_tweetids(cursor, hours_back=48, cap=5000)
+        if not root_ids:
+            return jsonify({"ok": True, "msg": "No hay tweets root en las últimas 48h"}), 200
 
-        total_replies_saved = 0
-        tweets_processed = 0
+        # 2) Obtener usernames (mejor que user_id para operador to:)
+        #    Si tu TweetUser.TweetUser guarda username, úsalo:
+        cursor.execute("SELECT TweetUser FROM TweetUser WHERE TweetUser IS NOT NULL AND TweetUser<>''")
+        usernames = [r[0] for r in cursor.fetchall()]
 
-        for tid in tweet_ids:
-            # corte por tiempo
-            if (time.time() - START) > TIME_BUDGET_SEC:
+        # 3) procesar pocas cuentas por corrida (anti-timeout)
+        batch_size = int(os.environ.get("REPLIES_BATCH_USERS", "3"))
+        start_idx = int(get_state(cursor, "replies_user_idx", "0") or "0")
+
+        selected = []
+        for i in range(batch_size):
+            if not usernames:
+                break
+            selected.append(usernames[(start_idx + i) % len(usernames)])
+
+        # guardo próximo inicio (round-robin)
+        next_start = (start_idx + len(selected)) % max(len(usernames), 1)
+        set_state(cursor, "replies_user_idx", str(next_start))
+
+        saved = 0
+        rate_limited = False
+        details = []
+
+        for uname in selected:
+            since_key = f"replies_since_id:{uname}"
+            since_id = get_state(cursor, since_key, None)
+
+            # paginar máximo 2 páginas por usuario (corto)
+            next_token = None
+            for page in range(2):
+                data = x_search_replies_to_username(uname, since_id, next_token)
+
+                if isinstance(data, dict) and data.get("rate_limited"):
+                    rate_limited = True
+                    details.append({"user": uname, "rate_limited": True, "retry_after": data.get("retry_after")})
+                    break
+
+                if isinstance(data, dict) and data.get("error"):
+                    details.append({"user": uname, "error": True, "status": data.get("status"), "body": data.get("body")})
+                    break
+
+                tweets = data.get("data", []) if isinstance(data, dict) else []
+                if not tweets:
+                    break
+
+                # filtrar por conversation_id ∈ root_ids
+                max_seen = since_id
+                for tw in tweets:
+                    conv_id = str(tw.get("conversation_id") or "")
+                    if conv_id and conv_id in root_ids:
+                        insert_reply(cursor, conv_id, tw)
+                        saved += 1
+                    # actualizar max id visto para since_id (son strings numéricas)
+                    tid = str(tw["id"])
+                    if (max_seen is None) or (int(tid) > int(max_seen)):
+                        max_seen = tid
+
+                if max_seen:
+                    set_state(cursor, since_key, str(max_seen))
+
+                meta = data.get("meta", {})
+                next_token = meta.get("next_token")
+                if not next_token:
+                    break
+
+            if rate_limited:
                 break
 
-            last_reply_id = get_last_reply_id_for_tweet(cursor, tid)
-
-            replies = fetch_replies_for_tweet(
-                tid,
-                since_id=last_reply_id,
-                max_pages=MAX_PAGES_PER_TWEET
-            )
-
-            if replies:
-                for rep in replies:
-                    insert_reply(cursor, rep, tid)
-                total_replies_saved += len(replies)
-
-            tweets_processed += 1
-
-            # commit parcial para no perder trabajo si corta
-            if tweets_processed % 25 == 0:
-                conn.commit()
-
         conn.commit()
-
         return jsonify({
             "ok": True,
-            "tweets_lote": len(tweet_ids),
-            "tweets_procesados": tweets_processed,
-            "replies_nuevos": total_replies_saved,
-            "corto_por_tiempo": (tweets_processed < len(tweet_ids))
+            "saved": saved,
+            "users_processed": selected,
+            "rate_limited": rate_limited,
+            "details": details
         }), 200
 
     except Error as e:
-        return jsonify({"ok": False, "error": f"MySQL: {e}"}), 500
+        return jsonify({"ok": False, "error": str(e)}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
@@ -426,9 +457,6 @@ def ingest_replies_handler():
             conn.close()
         except Exception:
             pass
-
-
-
 
 
 
