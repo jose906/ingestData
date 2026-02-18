@@ -162,92 +162,87 @@ def build_queries_from_user_ids(user_ids, max_len=500):
     return queries
 
 
-def fetch_new_tweets(last_tweet_id=None):
+import time
+
+def fetch_new_tweets(cursor, time_budget_sec=60):
     tweets_url = "https://api.twitter.com/2/tweets/search/recent"
     user_ids = get_users_id()
-
-    # 🔥 aquí la solución: dividir en queries válidas
     queries = build_queries_from_user_ids(user_ids, max_len=500)
 
-    now_bolivia = datetime.now(BOLIVIA_TZ)
+    # cargar estado
+    last_tweet_id, block_index, next_token = load_ingest_state(cursor)
 
     base_params = {
         "max_results": 100,
         "tweet.fields": "created_at,text,entities,author_id",
-        "expansions": "attachments.media_keys,author_id",
-        "media.fields": "url",
+        "expansions": "author_id",
         "user.fields": "username",
     }
-
-    if last_tweet_id is None:
-        start_time = (
-            now_bolivia
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .astimezone(timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        base_params["start_time"] = start_time
-        print(f"[INGEST] BD vacía -> start_time={start_time}")
-    else:
+    if last_tweet_id:
         base_params["since_id"] = last_tweet_id
-        print(f"[INGEST] Usando since_id={last_tweet_id}")
 
-    all_tweets = []
-    all_users = []
-    seen_tweet_ids = set()
-    seen_user_ids = set()
+    start = time.time()
+    all_tweets, all_users = [], []
+    seen_tweet_ids, seen_user_ids = set(), set()
 
-    for q in queries:
+    # continuar desde bloque guardado
+    i = block_index
+    while i < len(queries):
+        if time.time() - start > time_budget_sec:
+            break
+
         params = dict(base_params)
-        params["query"] = q
+        params["query"] = queries[i]
+        if next_token:
+            params["pagination_token"] = next_token
 
-        # primer request del bloque
-        response = requests.get(tweets_url, headers=headers, params=params)
-        if response.status_code != 200:
-            raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
+        r = requests.get(tweets_url, headers=headers, params=params)
+        if r.status_code != 200:
+            raise Exception(f"Error Twitter API: {r.status_code} - {r.text}")
+        data = r.json()
 
-        data = response.json()
-
-        # agrega data
+        # agrega tweets/users
         for tw in data.get("data", []):
             tid = tw.get("id")
             if tid and tid not in seen_tweet_ids:
                 seen_tweet_ids.add(tid)
                 all_tweets.append(tw)
 
-        includes = data.get("includes", {})
-        for u in includes.get("users", []):
+        for u in data.get("includes", {}).get("users", []):
             uid = u.get("id")
             if uid and uid not in seen_user_ids:
                 seen_user_ids.add(uid)
                 all_users.append(u)
 
-        # paginación del bloque
-        while "next_token" in data.get("meta", {}):
-            params["pagination_token"] = data["meta"]["next_token"]
-            response = requests.get(tweets_url, headers=headers, params=params)
-            if response.status_code != 200:
-                raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
-            data = response.json()
-
-            for tw in data.get("data", []):
-                tid = tw.get("id")
-                if tid and tid not in seen_tweet_ids:
-                    seen_tweet_ids.add(tid)
-                    all_tweets.append(tw)
-
-            includes = data.get("includes", {})
-            for u in includes.get("users", []):
-                uid = u.get("id")
-                if uid and uid not in seen_user_ids:
-                    seen_user_ids.add(uid)
-                    all_users.append(u)
+        # decidir siguiente estado
+        meta = data.get("meta", {})
+        if "next_token" in meta:
+            # sigo paginando el mismo bloque en la próxima pasada
+            next_token = meta["next_token"]
+            save_ingest_state(cursor, last_tweet_id, i, next_token)
+        else:
+            # terminé este bloque -> paso al siguiente
+            next_token = None
+            i += 1
+            save_ingest_state(cursor, last_tweet_id, i, None)
 
     return all_tweets, all_users
 
 
 
+
+def load_ingest_state(cursor):
+    cursor.execute("SELECT last_tweet_id, block_index, next_token FROM ingest_state2 WHERE id=1")
+    row = cursor.fetchone()
+    if not row:
+        return (None, 0, None)
+    return (str(row[0]) if row[0] is not None else None, int(row[1] or 0), row[2])
+
+def save_ingest_state(cursor, last_tweet_id, block_index, next_token):
+    cursor.execute(
+        "UPDATE ingest_state2 SET last_tweet_id=%s, block_index=%s, next_token=%s WHERE id=1",
+        (last_tweet_id, block_index, next_token)
+    )
 
 
 # ================== CLOUD RUN HANDLER ==================
