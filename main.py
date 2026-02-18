@@ -22,15 +22,7 @@ DB_CONFIG = {
     "charset": "utf8mb4",
     "port": "3306",
 }
-
-MAX_RULE_LEN = 512
-SAFE_RULE_LEN = 500        # margen para no pegar justo al límite
-TIME_BUDGET_S = 40         # corta paginación antes del timeout (ajusta)
-DEFAULT_MINUTES_BACK = 15  # primera vez por batch
-OVERLAP_MINUTES = 5  
-
-# Si ML es pesado, pon True para NO hacerlo en ingesta (evita timeout)
-DISABLE_ML_DURING_INGEST = False
+  
 
 
 
@@ -60,22 +52,6 @@ def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 
-def get_state(conn, key: str, default: str = "") -> str:
-    cur = conn.cursor()
-    cur.execute("SELECT v FROM ingest_state WHERE k=%s", (key,))
-    row = cur.fetchone()
-    cur.close()
-    return row[0] if row else default
-
-def set_state(conn, key: str, value: str):
-    cur = conn.cursor()
-    cur.execute("""
-      INSERT INTO ingest_state (k, v) VALUES (%s, %s)
-      ON DUPLICATE KEY UPDATE v=VALUES(v)
-    """, (key, value))
-    conn.commit()
-    cur.close()
-
 def get_last_tweet_id(cursor):
     cursor.execute("SELECT tweetid FROM Tweets ORDER BY tweetid DESC LIMIT 1")
     row = cursor.fetchone()
@@ -83,50 +59,52 @@ def get_last_tweet_id(cursor):
         return str(row[0])
     return None
 
-def get_users_id():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        user_id = []
-        cursor.execute("SELECT idTweetUser FROM TweetUser")
-        rows = cursor.fetchall()
-        for row in rows:
-            user_id.append(str(row[0]))
-        cursor.close()
-        conn.close()
-        return user_id
-    except Error as e:
-        print(f"[INGEST][ERROR] MySQL: {e}")
-        return []
 
+def get_or_create_tweet_user(cursor, username, id_tweetuser):
+    if not username:
+        return None
 
-# ================== BATCH BUILDER ==================
+    cursor.execute(
+        "SELECT idTweetUser FROM TweetUser WHERE TweetUser = %s",
+        (username,)
+    )
+    row = cursor.fetchone()
+    if row:
+        return row[0]
 
-def build_query_batches(user_ids, max_len=SAFE_RULE_LEN):
-    """
-    Crea batches tipo: from:1 OR from:2 ... sin pasarse de max_len.
-    """
-    batches = []
-    current = ""
+    cursor.execute(
+        "INSERT INTO TweetUser (idTweetUser, TweetUser) VALUES (%s, %s)",
+        (id_tweetuser, username or "")
+    )
+    return cursor.lastrowid
 
-    for uid in user_ids:
-        term = f"from:{uid}"
-        candidate = term if not current else (current + " OR " + term)
+def get_users_with_cursor(cursor):
+    cursor.execute("SELECT idTweetUser, last_tweetid FROM TweetUser")
+    return [(str(r[0]), str(r[1]) if r[1] is not None else None) for r in cursor.fetchall()]
 
-        if len(candidate) > max_len:
-            if current:
-                batches.append(current)
-            current = term
-        else:
-            current = candidate
+def update_user_cursor(cursor, user_id: str, last_tweetid: str):
+    cursor.execute(
+        "UPDATE TweetUser SET last_tweetid = %s WHERE idTweetUser = %s",
+        (last_tweetid, user_id)
+    )
 
-    if current:
-        batches.append(current)
+def fetch_user_tweets(user_id: str, since_id: str | None):
+    url = f"https://api.twitter.com/2/users/{user_id}/tweets"
+    params = {
+        "max_results": 100,
+        "tweet.fields": "created_at,text,entities,author_id",
+        # opcional: si NO necesitas media, quita expansions para acelerar
+        # "expansions": "attachments.media_keys",
+        # "media.fields": "url",
+    }
+    if since_id:
+        params["since_id"] = since_id
 
-    return batches
+    r = requests.get(url, headers=headers, params=params, timeout=20)
+    if r.status_code != 200:
+        raise Exception(f"Error Twitter API user timeline: {r.status_code} - {r.text}")
+    return r.json()
 
-
-# ================== INSERT / UPDATE ==================
 
 def insert_or_update_tweet(cursor, tweet, tweetuser_id):
     tweet_id = tweet["id"]
@@ -138,16 +116,9 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
         try:
             created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         except Exception:
-            created_dt = None
+            created_dt = created_at  # fallback string
 
     url = f"https://twitter.com/i/web/status/{tweet_id}"
-
-    if DISABLE_ML_DURING_INGEST:
-        sent = None
-        cat = None
-    else:
-        sent = MLModel.get_sentiment(text)[0]
-        cat = MLModel.predecir_categoria(text)[0]
 
     sql = """
     INSERT INTO Tweets
@@ -160,9 +131,7 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
       text = VALUES(text),
       created = VALUES(created),
       url = VALUES(url),
-      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser),
-      sentimiento = COALESCE(VALUES(sentimiento), sentimiento),
-      categoria = COALESCE(VALUES(categoria), categoria)
+      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
     """
 
     params = (
@@ -170,60 +139,85 @@ def insert_or_update_tweet(cursor, tweet, tweetuser_id):
         text,
         created_dt,
         url,
-        sent,
-        cat,
+        MLModel.get_sentiment(text)[0],
+        MLModel.predecir_categoria(text)[0],   # categoria (llenarás con otro worker o script)
         "", "", "", "", "",
         tweetuser_id,
     )
 
     cursor.execute(sql, params)
+def get_users_id():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        user_id = []
+        cursor.execute("SELECT idTweetUser FROM TweetUser")
+        rows = cursor.fetchall()
+        for row in rows:
+            user_id.append(str(row[0]))
+    except Error as e:
+        print(f"[INGEST][ERROR] MySQL: {e}")
+    return user_id
+    
+# ================== TWITTER ==================
 
+def fetch_new_tweets(last_tweet_id=None):
+    tweets_url = 'https://api.twitter.com/2/tweets/search/recent'
+    user_id = get_users_id()
+    query = ' OR '.join([f'from:{uid}' for uid in user_id])
 
-# ================== TWITTER FETCH (CON TIME BUDGET) ==================
-
-def fetch_new_tweets(query: str, start_time_utc: str | None = None, time_budget_s: int = TIME_BUDGET_S):
-    tweets_url = "https://api.twitter.com/2/tweets/search/recent"
-    t0 = time.time()
+    now_bolivia = datetime.now(BOLIVIA_TZ)
 
     params = {
-        "query": query,
-        "max_results": 100,
-        "tweet.fields": "created_at,text,entities,author_id",
-        "expansions": "attachments.media_keys,author_id",
-        "media.fields": "url",
-        "user.fields": "username",
+        'query': query,
+        'max_results': 100,
+        'tweet.fields': 'created_at,text,entities,author_id',
+        'expansions': 'attachments.media_keys,author_id',
+        'media.fields': 'url',
+        'user.fields': 'username'
     }
-    if start_time_utc:
-        params["start_time"] = start_time_utc
 
-    all_tweets, all_users = [], []
+    if last_tweet_id is None:
+        start_time = (
+            now_bolivia
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace('+16:00', 'Z')
+        )
+        params['start_time'] = start_time
+        print(f"[INGEST] BD vacía -> start_time={start_time}")
+    else:
+        params['since_id'] = last_tweet_id
+        print(f"[INGEST] Usando since_id={last_tweet_id}")
+
+    all_tweets = []
+    all_users = []
 
     response = requests.get(tweets_url, headers=headers, params=params)
     if response.status_code != 200:
         raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
-
     data = response.json()
-    all_tweets.extend(data.get("data", []))
-    includes = data.get("includes", {})
-    all_users.extend(includes.get("users", []))
+    print(f"[INGEST] response data: {data}")
+    all_tweets.extend(data.get('data', []))
+    includes = data.get('includes', {})
+    all_users.extend(includes.get('users', []))
 
-    # paginación con corte por presupuesto de tiempo
-    while "next_token" in data.get("meta", {}):
-        if time.time() - t0 > time_budget_s:
-            print("[INGEST] Cortando paginación por TIME_BUDGET_S para evitar timeout.")
-            break
-
-        params["pagination_token"] = data["meta"]["next_token"]
+    # paginación
+    while 'next_token' in data.get('meta', {}):
+        params['pagination_token'] = data['meta']['next_token']
         response = requests.get(tweets_url, headers=headers, params=params)
         if response.status_code != 200:
             raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
-
         data = response.json()
-        all_tweets.extend(data.get("data", []))
-        includes = data.get("includes", {})
-        all_users.extend(includes.get("users", []))
+        all_tweets.extend(data.get('data', []))
+        includes = data.get('includes', {})
+        all_users.extend(includes.get('users', []))
 
     return all_tweets, all_users
+
+
+
 
 
 # ================== CLOUD RUN HANDLER ==================
@@ -234,72 +228,33 @@ def ingest_handler():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-    
+        users = get_users_with_cursor(cursor)
 
-        user_ids = get_users_id()
-        if not user_ids:
-            return jsonify({"ok": True, "msg": "No hay usuarios en TweetUser", "nuevos": 0}), 200
+        # ✅ límite por ejecución (anti-timeout)
+        MAX_USERS_PER_RUN = 8
+        users = users[:MAX_USERS_PER_RUN]
 
-        batches = build_query_batches(user_ids, max_len=SAFE_RULE_LEN)
-        if not batches:
-            return jsonify({"ok": True, "msg": "No se pudo construir batches", "nuevos": 0}), 200
+        total = 0
+        for user_id, last_tweetid in users:
+            data = fetch_user_tweets(user_id, last_tweetid)
 
-        # round-robin
-        idx = int(get_state(conn, "batch_idx", "0"))
-        idx = idx % len(batches)
-        query = batches[idx]
+            tweets = data.get("data", []) or []
+            if not tweets:
+                continue
 
-        # start_time por batch (persistido) con overlap
-        key_last = f"batch_last_utc_{idx}"
-        last_utc = get_state(conn, key_last, "")
+            # inserta
+            for t in tweets:
+                insert_or_update_tweet(cursor, t, tweetuser_id=user_id)
+                total += 1
 
-        if last_utc:
-            last_dt = datetime.fromisoformat(last_utc.replace("Z", "+00:00"))
-            start_dt = last_dt - timedelta(minutes=OVERLAP_MINUTES)
-        else:
-            start_dt = datetime.now(timezone.utc) - timedelta(minutes=DEFAULT_MINUTES_BACK)
-
-        start_time_utc = start_dt.isoformat().replace("+00:00", "Z")
-
-        print(f"[INGEST] batches={len(batches)} idx={idx} query_len={len(query)} start_time={start_time_utc}")
-
-        tweets, users = fetch_new_tweets(query=query, start_time_utc=start_time_utc, time_budget_s=TIME_BUDGET_S)
-
-        if not tweets:
-            # avanzar batch aunque no haya datos
-            set_state(conn, "batch_idx", str(idx + 1))
-            set_state(conn, key_last, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
-            return jsonify({"ok": True, "batch": idx, "batches": len(batches), "nuevos": 0}), 200
-
-        users_map = {u["id"]: u.get("username") for u in users}
-
-        count = 0
-        for t in tweets:
-            author_id = t.get("author_id")
-            _username = users_map.get(author_id)  # por si lo necesitas después
-            insert_or_update_tweet(cursor, t, author_id)
-            count += 1
+            # ✅ actualiza cursor del usuario al mayor id visto
+            newest_id = max(t["id"] for t in tweets)
+            update_user_cursor(cursor, user_id, newest_id)
 
         conn.commit()
+        return jsonify({"ok": True, "nuevos": total, "usuarios_procesados": len(users)}), 200
 
-        # guardar estado
-        set_state(conn, "batch_idx", str(idx + 1))
-        set_state(conn, key_last, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
-
-        return jsonify({
-            "ok": True,
-            "batch": idx,
-            "batches": len(batches),
-            "query_len": len(query),
-            "time_budget_s": TIME_BUDGET_S,
-            "nuevos": count
-        }), 200
-
-    except Error as e:
-        print(f"[INGEST][ERROR] MySQL: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
     except Exception as e:
-        print(f"[INGEST][ERROR] General: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         try:
@@ -307,6 +262,7 @@ def ingest_handler():
             conn.close()
         except Exception:
             pass
+
 
 
 @app.route("/test", methods=["GET"])
