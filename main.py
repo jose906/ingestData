@@ -9,6 +9,8 @@ import mysql.connector
 from mysql.connector import Error
 import time
 from dateutil import parser as dtparser
+from flask import request
+
 
 
 # ================== CONFIG ==================
@@ -28,6 +30,8 @@ DB_CONFIG = {
 
 #TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
 TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAN9WpgEAAAAAHarp9HjcuJFZ4wtx1DtpsP8Z93A%3DC3AEHMO2YXaGFFgblPEdkYTGhBne75WLUlG5Mc95FGKlR003vg'
+MAX_RULE_LEN = 512
+
 
 if not TWITTER_BEARER_TOKEN:
     raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
@@ -59,7 +63,25 @@ def get_last_tweet_id(cursor):
         return str(row[0])
     return None
 
-MAX_RULE_LEN = 512
+
+
+def get_since_id_for_batch(conn, batch_idx: int):
+    cur = conn.cursor()
+    cur.execute("SELECT since_id FROM ingest_state2 WHERE batch_idx=%s", (batch_idx,))
+    row = cur.fetchone()
+    cur.close()
+    return str(row[0]) if row and row[0] else None
+
+def set_since_id_for_batch(conn, batch_idx: int, since_id: str):
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO ingest_state2 (batch_idx, since_id)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE since_id=VALUES(since_id)
+    """, (batch_idx, since_id))
+    conn.commit()
+    cur.close()
+
 
 def build_queries_from_user_ids(user_ids):
     queries = []
@@ -78,19 +100,15 @@ def build_queries_from_user_ids(user_ids):
     return queries
 
 
-from datetime import datetime, timedelta, timezone
+
 
 def iso_z(dt_utc):
     return dt_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def fetch_new_tweets2(last_tweet_id=None):
+def fetch_new_tweets2(conn):
     tweets_url = "https://api.twitter.com/2/tweets/search/recent"
     user_ids = get_users_id()
-
     queries = build_queries_from_user_ids(user_ids)
-
-    # ✅ Solape para no perder nada (20 min scheduler -> 25-30 min de ventana)
-    start_time = iso_z(datetime.now(timezone.utc) - timedelta(minutes=30))
 
     all_tweets, all_users = [], []
 
@@ -100,34 +118,47 @@ def fetch_new_tweets2(last_tweet_id=None):
         "expansions": "attachments.media_keys,author_id",
         "media.fields": "url",
         "user.fields": "username",
-        "start_time": start_time,
     }
 
-    # (opcional) si quieres mantener since_id como filtro adicional:
-    # if last_tweet_id:
-    #     base_params["since_id"] = last_tweet_id
-
-    for q in queries:
+    for batch_idx, q in enumerate(queries):
         params = dict(base_params)
         params["query"] = q
 
-        response = requests.get(tweets_url, headers=headers, params=params)
-        if response.status_code != 200:
-            raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
+        since_id = get_since_id_for_batch(conn, batch_idx)
 
-        data = response.json()
-        all_tweets.extend(data.get("data", []))
-        all_users.extend(data.get("includes", {}).get("users", []))
+        if since_id:
+            params["since_id"] = since_id
+        else:
+            # primera vez: trae más histórico para “llenar”
+            start_time = iso_z(datetime.now(timezone.utc) - timedelta(hours=6))
+            params["start_time"] = start_time
 
-        # paginación por batch
-        while "next_token" in data.get("meta", {}):
-            params["pagination_token"] = data["meta"]["next_token"]
-            response = requests.get(tweets_url, headers=headers, params=params)
-            if response.status_code != 200:
-                raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
-            data = response.json()
-            all_tweets.extend(data.get("data", []))
+        newest_id_in_batch = None
+
+        while True:
+            r = requests.get(tweets_url, headers=headers, params=params)
+            if r.status_code != 200:
+                raise Exception(f"Error Twitter API: {r.status_code} - {r.text}")
+            data = r.json()
+
+            batch_tweets = data.get("data", [])
+            all_tweets.extend(batch_tweets)
             all_users.extend(data.get("includes", {}).get("users", []))
+
+            # guarda el id más alto visto en este batch
+            for t in batch_tweets:
+                tid = t.get("id")
+                if tid and (newest_id_in_batch is None or int(tid) > int(newest_id_in_batch)):
+                    newest_id_in_batch = tid
+
+            meta = data.get("meta", {})
+            if "next_token" not in meta:
+                break
+            params["pagination_token"] = meta["next_token"]
+
+        # actualiza el cursor del batch
+        if newest_id_in_batch:
+            set_since_id_for_batch(conn, batch_idx, newest_id_in_batch)
 
     return all_tweets, all_users
 
@@ -262,29 +293,68 @@ def fetch_new_tweets(last_tweet_id=None):
 
     return all_tweets, all_users
 
+def fetch_new_tweets_bootstrap(conn, hours=24):
+    tweets_url = "https://api.twitter.com/2/tweets/search/recent"
+    user_ids = get_users_id()
+    queries = build_queries_from_user_ids(user_ids)
+
+    start_time = iso_z(datetime.now(timezone.utc) - timedelta(hours=hours))
+
+    base_params = {
+        "max_results": 100,
+        "tweet.fields": "created_at,text,entities,author_id",
+        "expansions": "attachments.media_keys,author_id",
+        "media.fields": "url",
+        "user.fields": "username",
+        "start_time": start_time,
+    }
+
+    all_tweets, all_users = [], []
+
+    for q in queries:
+        params = dict(base_params)
+        params["query"] = q
+
+        while True:
+            r = requests.get(tweets_url, headers=headers, params=params)
+            if r.status_code != 200:
+                raise Exception(f"Error Twitter API: {r.status_code} - {r.text}")
+            data = r.json()
+
+            all_tweets.extend(data.get("data", []))
+            all_users.extend(data.get("includes", {}).get("users", []))
+
+            meta = data.get("meta", {})
+            if "next_token" not in meta:
+                break
+            params["pagination_token"] = meta["next_token"]
+
+    return all_tweets, all_users
 
 
 
 
 # ================== CLOUD RUN HANDLER ==================
 
+
 @app.route("/ingest", methods=["GET"])
 def ingest_handler():
-    """
-    Endpoint que ejecuta UNA sola pasada de ingesta.
-    Cloud Scheduler llamará a /ingest cada X minutos.
-    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        last_tweet_id = get_last_tweet_id(cursor)
-        print(f"[INGEST] Último tweetid en BD: {last_tweet_id}")
+        bootstrap = request.args.get("bootstrap") == "1"
 
-        tweets, users = fetch_new_tweets2(last_tweet_id)
+        if bootstrap:
+            # 🔥 RELLENO 1 VEZ (no depende de since_id)
+            tweets, users = fetch_new_tweets_bootstrap(conn, hours=24)  # o 72, o 168
+            print("[INGEST] Bootstrap mode")
+        else:
+            # ✅ INCREMENTAL (scheduler)
+            tweets, users = fetch_new_tweets2(conn)
+            print("[INGEST] Incremental mode")
 
         if not tweets:
-            print("[INGEST] No hay tweets nuevos.")
             return jsonify({"ok": True, "nuevos": 0}), 200
 
         users_map = {u["id"]: u.get("username") for u in users}
@@ -292,27 +362,20 @@ def ingest_handler():
         count = 0
         for t in tweets:
             author_id = t.get("author_id")
-            username = users_map.get(author_id)
             tweetuser_id = author_id
             insert_or_update_tweet(cursor, t, tweetuser_id)
             count += 1
 
         conn.commit()
-        print(f"[INGEST] Guardados {count} tweets nuevos.")
         return jsonify({"ok": True, "nuevos": count}), 200
 
-    except Error as e:
-        print(f"[INGEST][ERROR] MySQL: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-    except Exception as e:
-        print(f"[INGEST][ERROR] General: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         try:
             cursor.close()
             conn.close()
         except Exception:
             pass
+
 
 
 @app.route("/test", methods=["GET"])
