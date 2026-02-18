@@ -83,7 +83,7 @@ from datetime import datetime, timedelta, timezone
 def iso_z(dt_utc):
     return dt_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def fetch_new_tweets(last_tweet_id=None):
+def fetch_new_tweets2(last_tweet_id=None):
     tweets_url = "https://api.twitter.com/2/tweets/search/recent"
     user_ids = get_users_id()
 
@@ -281,7 +281,7 @@ def ingest_handler():
         last_tweet_id = get_last_tweet_id(cursor)
         print(f"[INGEST] Último tweetid en BD: {last_tweet_id}")
 
-        tweets, users = fetch_new_tweets(last_tweet_id)
+        tweets, users = fetch_new_tweets2(last_tweet_id)
 
         if not tweets:
             print("[INGEST] No hay tweets nuevos.")
