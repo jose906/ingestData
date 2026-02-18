@@ -134,20 +134,49 @@ def get_users_id():
     
 # ================== TWITTER ==================
 
+def build_queries_from_user_ids(user_ids, max_len=500):
+    """
+    Construye múltiples queries 'from:ID OR from:ID ...' sin pasar max_len.
+    (500 deja margen vs límite 512).
+    """
+    queries = []
+    current = ""
+
+    for uid in user_ids:
+        term = f"from:{uid}"
+        if not current:
+            candidate = term
+        else:
+            candidate = f"{current} OR {term}"
+
+        if len(candidate) > max_len:
+            # cierra el bloque actual y empieza uno nuevo
+            queries.append(current)
+            current = term
+        else:
+            current = candidate
+
+    if current:
+        queries.append(current)
+
+    return queries
+
+
 def fetch_new_tweets(last_tweet_id=None):
-    tweets_url = 'https://api.twitter.com/2/tweets/search/recent'
-    user_id = get_users_id()
-    query = ' OR '.join([f'from:{uid}' for uid in user_id])
+    tweets_url = "https://api.twitter.com/2/tweets/search/recent"
+    user_ids = get_users_id()
+
+    # 🔥 aquí la solución: dividir en queries válidas
+    queries = build_queries_from_user_ids(user_ids, max_len=500)
 
     now_bolivia = datetime.now(BOLIVIA_TZ)
 
-    params = {
-        'query': query,
-        'max_results': 100,
-        'tweet.fields': 'created_at,text,entities,author_id',
-        'expansions': 'attachments.media_keys,author_id',
-        'media.fields': 'url',
-        'user.fields': 'username'
+    base_params = {
+        "max_results": 100,
+        "tweet.fields": "created_at,text,entities,author_id",
+        "expansions": "attachments.media_keys,author_id",
+        "media.fields": "url",
+        "user.fields": "username",
     }
 
     if last_tweet_id is None:
@@ -156,36 +185,64 @@ def fetch_new_tweets(last_tweet_id=None):
             .replace(hour=0, minute=0, second=0, microsecond=0)
             .astimezone(timezone.utc)
             .isoformat()
-            .replace('+16:00', 'Z')
+            .replace("+00:00", "Z")
         )
-        params['start_time'] = start_time
+        base_params["start_time"] = start_time
         print(f"[INGEST] BD vacía -> start_time={start_time}")
     else:
-        params['since_id'] = last_tweet_id
+        base_params["since_id"] = last_tweet_id
         print(f"[INGEST] Usando since_id={last_tweet_id}")
 
     all_tweets = []
     all_users = []
+    seen_tweet_ids = set()
+    seen_user_ids = set()
 
-    response = requests.get(tweets_url, headers=headers, params=params)
-    if response.status_code != 200:
-        raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
-    data = response.json()
-    print(f"[INGEST] response data: {data}")
-    all_tweets.extend(data.get('data', []))
-    includes = data.get('includes', {})
-    all_users.extend(includes.get('users', []))
+    for q in queries:
+        params = dict(base_params)
+        params["query"] = q
 
-    # paginación
-    while 'next_token' in data.get('meta', {}):
-        params['pagination_token'] = data['meta']['next_token']
+        # primer request del bloque
         response = requests.get(tweets_url, headers=headers, params=params)
         if response.status_code != 200:
-            raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
+            raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
+
         data = response.json()
-        all_tweets.extend(data.get('data', []))
-        includes = data.get('includes', {})
-        all_users.extend(includes.get('users', []))
+
+        # agrega data
+        for tw in data.get("data", []):
+            tid = tw.get("id")
+            if tid and tid not in seen_tweet_ids:
+                seen_tweet_ids.add(tid)
+                all_tweets.append(tw)
+
+        includes = data.get("includes", {})
+        for u in includes.get("users", []):
+            uid = u.get("id")
+            if uid and uid not in seen_user_ids:
+                seen_user_ids.add(uid)
+                all_users.append(u)
+
+        # paginación del bloque
+        while "next_token" in data.get("meta", {}):
+            params["pagination_token"] = data["meta"]["next_token"]
+            response = requests.get(tweets_url, headers=headers, params=params)
+            if response.status_code != 200:
+                raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
+            data = response.json()
+
+            for tw in data.get("data", []):
+                tid = tw.get("id")
+                if tid and tid not in seen_tweet_ids:
+                    seen_tweet_ids.add(tid)
+                    all_tweets.append(tw)
+
+            includes = data.get("includes", {})
+            for u in includes.get("users", []):
+                uid = u.get("id")
+                if uid and uid not in seen_user_ids:
+                    seen_user_ids.add(uid)
+                    all_users.append(u)
 
     return all_tweets, all_users
 
