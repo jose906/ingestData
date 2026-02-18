@@ -260,7 +260,7 @@ def ingest_handler():
         last_tweet_id = get_last_tweet_id(cursor)
         print(f"[INGEST] Último tweetid en BD: {last_tweet_id}")
 
-        tweets, users = fetch_new_tweets(last_tweet_id)
+        tweets, users = fetch_new_tweets(cursor, time_budget_sec=50)  # dejo margen vs timeout Cloud Run (60s)
 
         if not tweets:
             print("[INGEST] No hay tweets nuevos.")
