@@ -48,6 +48,11 @@ app = Flask(__name__)
 
 # ================== FUNCIONES BD ==================
 
+
+def chunk_list(data, chunk_size):
+    for i in range(0, len(data), chunk_size):
+        yield data[i:i + chunk_size]
+
 def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
@@ -77,33 +82,6 @@ def get_or_create_tweet_user(cursor, username, id_tweetuser):
         (id_tweetuser, username or "")
     )
     return cursor.lastrowid
-
-def get_users_with_cursor(cursor):
-    cursor.execute("SELECT idTweetUser, last_tweetid FROM TweetUser")
-    return [(str(r[0]), str(r[1]) if r[1] is not None else None) for r in cursor.fetchall()]
-
-def update_user_cursor(cursor, user_id: str, last_tweetid: str):
-    cursor.execute(
-        "UPDATE TweetUser SET last_tweetid = %s WHERE idTweetUser = %s",
-        (last_tweetid, user_id)
-    )
-
-def fetch_user_tweets(user_id: str, since_id: str | None):
-    url = f"https://api.twitter.com/2/users/{user_id}/tweets"
-    params = {
-        "max_results": 100,
-        "tweet.fields": "created_at,text,entities,author_id",
-        # opcional: si NO necesitas media, quita expansions para acelerar
-        # "expansions": "attachments.media_keys",
-        # "media.fields": "url",
-    }
-    if since_id:
-        params["since_id"] = since_id
-
-    r = requests.get(url, headers=headers, params=params, timeout=20)
-    if r.status_code != 200:
-        raise Exception(f"Error Twitter API user timeline: {r.status_code} - {r.text}")
-    return r.json()
 
 
 def insert_or_update_tweet(cursor, tweet, tweetuser_id):
@@ -162,61 +140,67 @@ def get_users_id():
 # ================== TWITTER ==================
 
 def fetch_new_tweets(last_tweet_id=None):
-    tweets_url = 'https://api.twitter.com/2/tweets/search/recent'
-    user_id = get_users_id()
-    query = ' OR '.join([f'from:{uid}' for uid in user_id])
+    tweets_url = "https://api.twitter.com/2/tweets/search/recent"
+    user_ids = get_users_id()
 
     now_bolivia = datetime.now(BOLIVIA_TZ)
-
-    params = {
-        'query': query,
-        'max_results': 100,
-        'tweet.fields': 'created_at,text,entities,author_id',
-        'expansions': 'attachments.media_keys,author_id',
-        'media.fields': 'url',
-        'user.fields': 'username'
-    }
-
-    if last_tweet_id is None:
-        start_time = (
-            now_bolivia
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .astimezone(timezone.utc)
-            .isoformat()
-            .replace('+16:00', 'Z')
-        )
-        params['start_time'] = start_time
-        print(f"[INGEST] BD vacía -> start_time={start_time}")
-    else:
-        params['since_id'] = last_tweet_id
-        print(f"[INGEST] Usando since_id={last_tweet_id}")
 
     all_tweets = []
     all_users = []
 
-    response = requests.get(tweets_url, headers=headers, params=params)
-    if response.status_code != 200:
-        raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
-    data = response.json()
-    print(f"[INGEST] response data: {data}")
-    all_tweets.extend(data.get('data', []))
-    includes = data.get('includes', {})
-    all_users.extend(includes.get('users', []))
+    for user_batch in chunk_list(user_ids, 20):  # 20 usuarios por query
+        query = " OR ".join([f"from:{uid}" for uid in user_batch])
 
-    # paginación
-    while 'next_token' in data.get('meta', {}):
-        params['pagination_token'] = data['meta']['next_token']
+        params = {
+            "query": query,
+            "max_results": 100,
+            "tweet.fields": "created_at,text,entities,author_id",
+            "expansions": "attachments.media_keys,author_id",
+            "media.fields": "url",
+            "user.fields": "username",
+        }
+
+        # filtro temporal (se aplica por batch)
+        if last_tweet_id is None:
+            start_time = (
+                now_bolivia
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            params["start_time"] = start_time
+            print(f"[INGEST] BD vacía -> start_time={start_time} (batch={len(user_batch)})")
+        else:
+            params["since_id"] = last_tweet_id
+            print(f"[INGEST] Usando since_id={last_tweet_id} (batch={len(user_batch)})")
+
+        # 1ra llamada
         response = requests.get(tweets_url, headers=headers, params=params)
         if response.status_code != 200:
-            raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
+            raise Exception(f"Error Twitter API: {response.status_code} - {response.text}")
+
         data = response.json()
-        all_tweets.extend(data.get('data', []))
-        includes = data.get('includes', {})
-        all_users.extend(includes.get('users', []))
+        all_tweets.extend(data.get("data", []))
+
+        includes = data.get("includes", {})
+        all_users.extend(includes.get("users", []))
+
+        # paginación por batch
+        while "next_token" in data.get("meta", {}):
+            params["pagination_token"] = data["meta"]["next_token"]
+
+            response = requests.get(tweets_url, headers=headers, params=params)
+            if response.status_code != 200:
+                raise Exception(f"Error paginación Twitter API: {response.status_code} - {response.text}")
+
+            data = response.json()
+            all_tweets.extend(data.get("data", []))
+
+            includes = data.get("includes", {})
+            all_users.extend(includes.get("users", []))
 
     return all_tweets, all_users
-
-
 
 
 
@@ -224,37 +208,42 @@ def fetch_new_tweets(last_tweet_id=None):
 
 @app.route("/ingest", methods=["GET"])
 def ingest_handler():
+    """
+    Endpoint que ejecuta UNA sola pasada de ingesta.
+    Cloud Scheduler llamará a /ingest cada X minutos.
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        users = get_users_with_cursor(cursor)
+        last_tweet_id = get_last_tweet_id(cursor)
+        print(f"[INGEST] Último tweetid en BD: {last_tweet_id}")
 
-        # ✅ límite por ejecución (anti-timeout)
-        MAX_USERS_PER_RUN = 8
-        users = users[:MAX_USERS_PER_RUN]
+        tweets, users = fetch_new_tweets(last_tweet_id)
 
-        total = 0
-        for user_id, last_tweetid in users:
-            data = fetch_user_tweets(user_id, last_tweetid)
+        if not tweets:
+            print("[INGEST] No hay tweets nuevos.")
+            return jsonify({"ok": True, "nuevos": 0}), 200
 
-            tweets = data.get("data", []) or []
-            if not tweets:
-                continue
+        users_map = {u["id"]: u.get("username") for u in users}
 
-            # inserta
-            for t in tweets:
-                insert_or_update_tweet(cursor, t, tweetuser_id=user_id)
-                total += 1
-
-            # ✅ actualiza cursor del usuario al mayor id visto
-            newest_id = max(t["id"] for t in tweets)
-            update_user_cursor(cursor, user_id, newest_id)
+        count = 0
+        for t in tweets:
+            author_id = t.get("author_id")
+            username = users_map.get(author_id)
+            tweetuser_id = author_id
+            insert_or_update_tweet(cursor, t, tweetuser_id)
+            count += 1
 
         conn.commit()
-        return jsonify({"ok": True, "nuevos": total, "usuarios_procesados": len(users)}), 200
+        print(f"[INGEST] Guardados {count} tweets nuevos.")
+        return jsonify({"ok": True, "nuevos": count}), 200
 
+    except Error as e:
+        print(f"[INGEST][ERROR] MySQL: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
     except Exception as e:
+        print(f"[INGEST][ERROR] General: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         try:
@@ -262,7 +251,6 @@ def ingest_handler():
             conn.close()
         except Exception:
             pass
-
 
 
 @app.route("/test", methods=["GET"])
