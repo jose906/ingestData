@@ -132,7 +132,10 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
     if not last_tweetid:
         a = True
     else:
-        params["since_id"] = str(last_tweetid)
+        if int(last_tweetid) > 2021801401432145920:
+            params["since_id"] = str(last_tweetid)
+        else: 
+            a = True
 
     tweets_data = []
     tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
