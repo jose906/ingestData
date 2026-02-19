@@ -121,7 +121,7 @@ def bolivia_day_start_utc_iso():
 
 
 
-def fetch_tweets_for_user(username: str, last_tweetid: str | None):
+def fetch_tweets_for_user(username: str, last_tweetid ):
     params = {
         "query": f"from:{username}",
         "max_results": 100,
@@ -130,7 +130,7 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
     a = False
     
 
-    if not last_tweetid or last_tweetid in (None, ""):
+    if not last_tweetid or last_tweetid in (None, "") or last_tweetid == 1:
         a = True
     else:
         if int(last_tweetid) > 2021801401432145920:
@@ -237,7 +237,8 @@ def ingest_handler():
             tweets = fetch_tweets_for_user(username, last_tid)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
-                update_last_tweetid(cur, u["idTweetUser"], last_tid or None)
+                
+                update_last_tweetid(cur, u["idTweetUser"], last_tid or 1)
                 continue
 
             saved = 0
