@@ -252,6 +252,7 @@ def ingest_handler():
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
                 update_last_tweetid(cur, u["idTweetUser"], last_tid )
+                conn.commit()
                 continue
 
             saved = 0
