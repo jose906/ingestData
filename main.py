@@ -95,9 +95,9 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         text,
         created_dt,
         url,
-        MLModel.get_sentiment(text)[0],
-        MLModel.predecir_categoria(text)[0],
-        "", "", "", "", "",
+        "",
+        "",
+        "", "", "", "",
         int(tweetuser_pk_id),
     )
     cur.execute(sql, params)
