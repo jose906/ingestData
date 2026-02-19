@@ -246,7 +246,7 @@ def ingest_handler():
 
             saved = 0
             for t in tweets:
-                saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
+                saved += insert_or_update_tweet( t, tweetuser_pk_id)
 
             # actualiza last_tweetid
             max_tid = max_tweet_id(tweets)
