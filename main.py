@@ -128,6 +128,7 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
         "tweet.fields": "created_at,text,entities,author_id",
     }
     a = False
+    
 
     if not last_tweetid or last_tweetid in (None, ""):
         a = True
@@ -236,7 +237,7 @@ def ingest_handler():
             tweets = fetch_tweets_for_user(username, last_tid)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
-                update_last_tweetid(cur, u["idTweetUser"], last_tid or "")
+                update_last_tweetid(cur, u["idTweetUser"], last_tid or None)
                 continue
 
             saved = 0
