@@ -127,9 +127,10 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
         "max_results": 100,
         "tweet.fields": "created_at,text,entities,author_id",
     }
+    a = False
 
     if not last_tweetid:
-        params["start_time"] = bolivia_day_start_utc_iso()
+        a = True
     else:
         params["since_id"] = str(last_tweetid)
 
@@ -142,6 +143,8 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
     tweets_data.extend(j.get("data", []))
 
     while "next_token" in j.get("meta", {}):
+        if a:
+            break
         params["pagination_token"] = j["meta"]["next_token"]
         tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
         if tweets_response.status_code != 200:
