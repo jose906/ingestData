@@ -241,12 +241,12 @@ def ingest_handler():
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
-                update_last_tweetid(cur, u["idTweetUser"], last_tid )
+                update_last_tweetid( u["idTweetUser"], last_tid )
                 continue
 
             saved = 0
             for t in tweets:
-                saved += insert_or_update_tweet( t, tweetuser_pk_id)
+                saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
 
             # actualiza last_tweetid
             max_tid = max_tweet_id(tweets)
