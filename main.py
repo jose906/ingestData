@@ -97,6 +97,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         url,
         "",
         "",
+        "",
         "", "", "", "",
         int(tweetuser_pk_id),
     )
