@@ -160,9 +160,12 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
 
 
     
-def update_last_tweetid(cur, idTweetUser, last_tweetid):
+def update_last_tweetid(idTweetUser, last_tweetid):
+    conn = get_db_connection()
+    cur = conn.cursor(dictionary=True)
     sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = 1 WHERE idTweetUser = %s"
     cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
+    conn.commit()
     
 
 def max_tweet_id(tweets):
