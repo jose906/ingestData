@@ -95,10 +95,9 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         text,
         created_dt,
         url,
-        "",
-        "",
-        "",
-        "", "", "", "",
+        MLModel.get_sentiment(text)[0],
+        MLModel.predecir_categoria(text)[0],
+        "", "", "", "", "",
         int(tweetuser_pk_id),
     )
     cur.execute(sql, params)
@@ -167,7 +166,7 @@ def update_last_tweetid(idTweetUser, last_tweetid):
     cur = conn.cursor(dictionary=True)
     sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = 1 WHERE idTweetUser = %s"
     cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
-    conn.commit()
+    
     
 
 def max_tweet_id(tweets):
