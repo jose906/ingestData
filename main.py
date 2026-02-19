@@ -129,7 +129,7 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
     }
     a = False
 
-    if not last_tweetid:
+    if not last_tweetid or last_tweetid in (None, ""):
         a = True
     else:
         if int(last_tweetid) > 2021801401432145920:
