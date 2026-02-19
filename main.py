@@ -160,13 +160,22 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
 
 
     
-def update_last_tweetid(cur,idTweetUser, last_tweetid):
-    if cur is None:
-        cur = get_db_connection().cursor()
-        
-    sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = 1 WHERE idTweetUser = %s"
-    cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
+def update_last_tweetid(cur, idTweetUser, last_tweetid):
+    sql = """
+        UPDATE TweetUser 
+        SET last_tweetid = %s, tweets_procesados = 1 
+        WHERE idTweetUser = %s
+    """
     
+    cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
+
+    if cur.rowcount > 0:
+        print(f"✅ Usuario {idTweetUser} actualizado correctamente con last_tweetid={last_tweetid}")
+        return True
+    else:
+        print(f"⚠️ No se actualizó ningún registro para idTweetUser={idTweetUser}")
+        return False
+
     
 
 def max_tweet_id(tweets):
