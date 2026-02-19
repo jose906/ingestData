@@ -57,59 +57,7 @@ def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 
-def pick_users_to_process(conn, limit=MAX_USERS_PER_RUN):
-    """
-    Selecciona hasta N usuarios para procesar rotando por tweets_procesados.
-    Prioridad:
-      1) bootstrap: sin last_tweetid (NULL o '')
-      2) menor tweets_procesados
-      3) menor last_tweetid (desempate)
-    """
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """
-        SELECT idTweetUser, TweetUser, last_tweetid, tweets_procesados
-        FROM TweetUser
-        ORDER BY
-          CASE WHEN last_tweetid IS NULL OR last_tweetid = '' THEN 0 ELSE 1 END ASC,
-          tweets_procesados ASC,
-          CAST(NULLIF(last_tweetid,'') AS UNSIGNED) ASC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-    return rows
 
-
-def update_user_last_tweetid(conn, tweetuser_pk_id, last_tweetid_str):
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE TweetUser
-        SET last_tweetid = %s
-        WHERE idTweetUser = %s
-        """,
-        (str(last_tweetid_str), int(tweetuser_pk_id)),
-    )
-    cur.close()
-
-
-def bump_user_processed_tweets(conn, tweetuser_pk_id, inc):
-    """
-    Suma al contador de tweets procesados.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE TweetUser
-        SET tweets_procesados = tweets_procesados + %s
-        WHERE idTweetUser = %s
-        """,
-        (int(inc), int(tweetuser_pk_id)),
-    )
-    cur.close()
 
 
 # ================== INSERT TWEETS ==================
@@ -169,23 +117,6 @@ def bolivia_day_start_utc_iso():
 
 # ================== X API ==================
 
-def request_with_retry(url, headers, params, max_retries=4):
-    wait = 2
-    last_exc = None
-    for _ in range(max_retries):
-        r = requests.get(url, headers=headers, params=params, timeout=30)
-        if r.status_code == 200:
-            return r
-
-        if r.status_code == 429 or (500 <= r.status_code <= 599):
-            time.sleep(wait)
-            wait = min(wait * 2, 30)
-            last_exc = Exception(f"X API error {r.status_code}: {r.text}")
-            continue
-
-        raise Exception(f"X API error {r.status_code}: {r.text}")
-
-    raise last_exc if last_exc else Exception("X API error: retries agotados")
 
 
 def fetch_tweets_for_user(username: str, last_tweetid: str | None):
@@ -195,9 +126,12 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
     - Si last_tweetid existe => since_id = last_tweetid
     """
     params = {
-        "query": f"from:{username}",
-        "max_results": MAX_RESULTS_PER_CALL,
-        "tweet.fields": "created_at,text,entities,author_id",
+        'query': username, 
+        'max_results': 100,  # max 100 tweets per request
+        'tweet.fields': 'created_at,text,entities,author_id',  # Campos del tweet
+        'user.fields':'username',
+        'expansions': 'attachments.media_keys,author_id',  # Expansión para obtener medios adjuntos
+        'media.fields': 'url'
     }
 
     if not last_tweetid:
@@ -206,23 +140,26 @@ def fetch_tweets_for_user(username: str, last_tweetid: str | None):
         params["since_id"] = str(last_tweetid)
 
     all_tweets = []
+    tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
+    if tweets_response.status_code != 200:
+        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
 
-    r = request_with_retry(TWEETS_URL, headers, params)
-    data = r.json()
-    all_tweets.extend(data.get("data", []))
+    tweets = tweets_response.json()
+    tweets_data = tweets['data']
 
-    while True:
-        meta = data.get("meta", {}) or {}
-        next_token = meta.get("next_token")
-        if not next_token:
-            break
-        params["pagination_token"] = next_token
-        r = request_with_retry(TWEETS_URL, headers, params)
-        data = r.json()
-        all_tweets.extend(data.get("data", []))
+    while 'next_token' in tweets_response.json().get('meta', {}):
+      params['pagination_token'] = tweets_response.json()['meta']['next_token']
+      tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
+      tweets_data.extend(tweets_response.json().get('data', []))
 
-    return all_tweets
+    return tweets_data
+    
 
+    
+def update_last_tweetid(cur, idTweetUser, last_tweetid):
+    sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = tweets_procesados + 1 WHERE idTweetUser = %s"
+    cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
+    
 
 def max_tweet_id(tweets):
     if not tweets:
@@ -230,6 +167,45 @@ def max_tweet_id(tweets):
     m = max(int(t["id"]) for t in tweets if "id" in t)
     return str(m)
 
+def get_users(limit=5):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT idTweetUser, TweetUser, last_tweetid, tweets_procesados
+            FROM TweetUser
+            WHERE tweets_procesados = 0
+            ORDER BY idTweetUser ASC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+    except Exception as e:
+        print(f"Error fetching users: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def update_all():
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE TweetUser SET tweets_procesados = 0")
+        conn.commit()
+    except Exception as e:
+        print(f"Error resetting users: {e}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 # ================== CLOUD RUN HANDLER ==================
 
@@ -248,9 +224,11 @@ def ingest_handler():
     try:
         conn = get_db_connection()
 
-        users = pick_users_to_process(conn, MAX_USERS_PER_RUN)
+        users = get_users()
+        
         if not users:
-            return jsonify({"ok": True, "msg": "No hay usuarios en TweetUser", "procesados": 0}), 200
+            update_all()
+            users = get_users()
 
         total_saved = 0
         per_user_stats = []
@@ -260,54 +238,24 @@ def ingest_handler():
             username = (u.get("TweetUser") or "").strip()  # para from:username
             last_tid = u.get("last_tweetid")
             last_tid = str(last_tid) if last_tid not in (None, "") else None
-
-            if not username:
-                per_user_stats.append({
-                    "idTweetUser": tweetuser_pk_id,
-                    "username": username,
-                    "nuevos": 0,
-                    "error": "TweetUser (username) vacío",
-                })
-                continue
-
             tweets = fetch_tweets_for_user(username, last_tid)
 
             if not tweets:
-                per_user_stats.append({
-                    "idTweetUser": tweetuser_pk_id,
-                    "username": username,
-                    "nuevos": 0,
-                    "updated_last_tweetid": False
-                })
-                time.sleep(REQUEST_SLEEP_SECONDS)
                 continue
 
-            cur = conn.cursor()
-            saved = 0
-            for t in tweets:
-                insert_or_update_tweet(cur, t, tweetuser_pk_id=tweetuser_pk_id)
-                saved += 1
-
-            new_last = max_tweet_id(tweets)
-            if new_last:
-                update_user_last_tweetid(conn, tweetuser_pk_id, new_last)
-
-            # contador de rotación
-            bump_user_processed_tweets(conn, tweetuser_pk_id, saved)
-
-            conn.commit()
-            cur.close()
-
+            saved = insert_or_update_tweet(conn, tweets, tweetuser_pk_id)
             total_saved += saved
-            per_user_stats.append({
-                "idTweetUser": tweetuser_pk_id,
-                "username": username,
-                "nuevos": saved,
-                "updated_last_tweetid": True,
-                "last_tweetid": new_last,
-            })
 
-            time.sleep(REQUEST_SLEEP_SECONDS)
+            # Actualizar last_tweetid del usuario
+            max_tid = max_tweet_id(tweets)
+            if max_tid:
+                update_last_tweetid(conn, u["idTweetUser"], max_tid)
+
+            per_user_stats.append({
+                "username": username,
+                "tweets_guardados": saved,
+                "last_tweetid": max_tid
+            })
 
         return jsonify({
             "ok": True,
