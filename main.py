@@ -161,7 +161,7 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
 
     
 def update_last_tweetid(cur, idTweetUser, last_tweetid):
-    sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = tweets_procesados + 1 WHERE idTweetUser = %s"
+    sql = "UPDATE TweetUser SET last_tweetid = %s, tweets_procesados = 1 WHERE idTweetUser = %s"
     cur.execute(sql, (str(last_tweetid), int(idTweetUser)))
     
 
@@ -238,7 +238,7 @@ def ingest_handler():
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
-                update_last_tweetid(cur, u["idTweetUser"], last_tid or 1)
+                update_last_tweetid(cur, u["idTweetUser"], last_tid )
                 continue
 
             saved = 0
