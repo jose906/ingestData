@@ -251,7 +251,7 @@ def ingest_handler():
             # actualiza last_tweetid
             max_tid = max_tweet_id(tweets)
             if max_tid:
-                update_last_tweetid(cur, u["idTweetUser"], max_tid)
+                update_last_tweetid(u["idTweetUser"], max_tid)
 
             conn.commit()
 
