@@ -146,15 +146,7 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
     j = tweets_response.json()
     tweets_data.extend(j.get("data", []))
 
-    while "next_token" in j.get("meta", {}):
-        if a:
-            break
-        params["pagination_token"] = j["meta"]["next_token"]
-        tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
-        if tweets_response.status_code != 200:
-            raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
-        j = tweets_response.json()
-        tweets_data.extend(j.get("data", []))
+   
 
     return tweets_data
 
@@ -226,7 +218,7 @@ def update_all():
 
 # ================== CLOUD RUN HANDLER ==================
 
-
+@app.route("/ingest", methods=["GET"])
 def ingest_handler():
     conn = None
     try:
@@ -403,7 +395,7 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
 
     return r.json()
 
-
+@app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     """
     Extrae replies NUEVOS dirigidos a tus cuentas,
