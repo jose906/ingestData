@@ -226,7 +226,7 @@ def update_all():
 
 # ================== CLOUD RUN HANDLER ==================
 
-@app.route("/ingest", methods=["GET"])
+
 def ingest_handler():
     conn = None
     try:
@@ -403,7 +403,7 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
 
     return r.json()
 
-@app.route("/ingest_replies", methods=["GET"])
+
 def ingest_replies_handler():
     """
     Extrae replies NUEVOS dirigidos a tus cuentas,
