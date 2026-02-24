@@ -184,7 +184,7 @@ def max_tweet_id(tweets):
     m = max(int(t["id"]) for t in tweets if "id" in t)
     return str(m)
 
-def get_users(limit=5):
+def get_users(limit=1):
     conn = None
     try:
         conn = get_db_connection()
