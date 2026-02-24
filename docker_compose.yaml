@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  flask_app:
+    build: .
+    container_name: flask_app
+    restart: always
+    ports:
+      - "5000:5000"          # Accedes desde tu host en http://localhost:5001
+    volumes:
+      - .:/app               # Sincroniza tu carpeta local con el contenedor
+    environment:
+      - FLASK_APP=main.py
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+      - TZ=America/La_Paz
+      # Variables de conexión a BD externa (puedes ajustar)
+      - DB_HOST=34.69.57.221
+      - DB_USER=admin
+      - DB_PASSWORD=Admin123!
+      - DB_NAME=Analisis
