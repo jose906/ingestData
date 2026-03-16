@@ -411,9 +411,10 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
         author_id,
         MLModel.get_sentiment(text)[0] if text else None,
     ))
-
+'''
 def x_search_replies_to_username(username: str, since_id: str | None, next_token: str | None):
     url = "https://api.twitter.com/2/tweets/search/recent"
+    
     params = {
         "query": f"to:{username} is:reply",
         "max_results": 100,
@@ -430,6 +431,46 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
     if r.status_code == 429:
         retry_after = r.headers.get("retry-after")
         return {"rate_limited": True, "retry_after": retry_after, "status": 429, "body": r.text}
+
+    if r.status_code != 200:
+        return {"error": True, "status": r.status_code, "body": r.text}
+
+    return r.json()
+
+'''
+def x_search_replies_to_username(username: str, since_id: str | None, next_token: str | None):
+    url = "https://api.twitter.com/2/tweets/search/recent"
+
+    base_params = {
+        "query": f"to:{username} is:reply",
+        "max_results": 100,
+        "tweet.fields": "created_at,author_id,conversation_id",
+    }
+
+    def do_request(use_since=True):
+        params = dict(base_params)
+
+        if use_since and since_id:
+            params["since_id"] = since_id
+        if next_token:
+            params["next_token"] = next_token
+
+        return requests.get(url, headers=headers, params=params, timeout=20)
+
+    r = do_request(use_since=True)
+
+    if r.status_code == 429:
+        retry_after = r.headers.get("retry-after")
+        return {"rate_limited": True, "retry_after": retry_after, "status": 429, "body": r.text}
+
+    if r.status_code == 400 and since_id:
+        body_text = r.text or ""
+        if "since_id" in body_text and "must be a tweet id created after" in body_text:
+            return {
+                "since_id_expired": True,
+                "status": 400,
+                "body": body_text
+            }
 
     if r.status_code != 200:
         return {"error": True, "status": r.status_code, "body": r.text}
@@ -483,6 +524,14 @@ def ingest_replies_handler():
             next_token = None
             for page in range(2):
                 data = x_search_replies_to_username(uname, since_id, next_token)
+                
+
+                if isinstance(data, dict) and data.get("since_id_expired"):
+                    print(f"⚠️ since_id expirado para {uname}: {since_id}")
+                    set_state(cursor, since_key, "")   # o None si tu tabla lo maneja
+                    since_id = None
+                    next_token = None
+                    data = x_search_replies_to_username(uname, None, None)
 
                 if isinstance(data, dict) and data.get("rate_limited"):
                     rate_limited = True
