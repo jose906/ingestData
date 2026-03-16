@@ -35,7 +35,8 @@ if not TWITTER_BEARER_TOKEN:
 headers = {
     "Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"
 }
-TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
+#TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
+TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
 
 
 USER_IDS = [
@@ -119,7 +120,7 @@ def bolivia_day_start_utc_iso():
 
 # ================== X API ==================
 
-
+'''
 
 def fetch_tweets_for_user(username: str, last_tweetid ):
     params = {
@@ -149,8 +150,45 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
    
 
     return tweets_data
+    '''
 
+def fetch_tweets_for_user(user_id: str, last_tweetid):
 
+    params = {
+        "max_results": 100,
+        "tweet.fields": "created_at,text,entities,author_id"
+    }
+
+    if last_tweetid not in (None, "", "1"):
+        params["since_id"] = str(last_tweetid)
+
+    url = TWEETS_URL.format(user_id)
+
+    tweets_data = []
+    next_token = None
+
+    while True:
+
+        if next_token:
+            params["pagination_token"] = next_token
+
+        r = requests.get(url, headers=headers, params=params, timeout=20)
+
+        if r.status_code != 200:
+            raise Exception(f"Error {r.status_code}: {r.text}")
+
+        j = r.json()
+
+        tweets = j.get("data", [])
+        tweets_data.extend(tweets)
+
+        meta = j.get("meta", {})
+        next_token = meta.get("next_token")
+
+        if not next_token:
+            break
+
+    return tweets_data
     
 def update_last_tweetid(cur, idTweetUser, last_tweetid):
     sql = """
@@ -238,8 +276,11 @@ def ingest_handler():
             username = (u.get("TweetUser") or "").strip()
             last_tid = u.get("last_tweetid")
             last_tid = str(last_tid) if last_tid not in (None, "") else None
+            user_id = str(u["idTweetUser"])
 
-            tweets = fetch_tweets_for_user(username, last_tid)
+            tweets = fetch_tweets_for_user(user_id, last_tid)
+
+            #tweets = fetch_tweets_for_user(username, last_tid)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
