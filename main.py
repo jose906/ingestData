@@ -35,8 +35,8 @@ if not TWITTER_BEARER_TOKEN:
 headers = {
     "Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"
 }
-#TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
-TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
+TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
+#TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
 
 
 USER_IDS = [
