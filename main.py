@@ -499,7 +499,7 @@ def ingest_replies_handler():
         usernames = [r[0] for r in cursor.fetchall()]
 
         # 3) procesar pocas cuentas por corrida (anti-timeout)
-        batch_size = int(os.environ.get("REPLIES_BATCH_USERS", "3"))
+        batch_size = 1
         start_idx = int(get_state(cursor, "replies_user_idx", "0") or "0")
 
         selected = []
