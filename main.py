@@ -141,11 +141,34 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
     tweets_data = []
     tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
     if tweets_response.status_code != 200:
+
         if tweets_response.status_code == 400:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            update_last_tweetid(cur,userid,1 )
-        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
+            try:
+                error_json = tweets_response.json()
+
+                errors = error_json.get("errors", [])
+                if errors:
+                    message = errors[0].get("message", "")
+
+                    if "since_id" in message:
+                        print(f"⚠️ since_id inválido para user {userid}, reseteando...")
+
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+
+                        update_last_tweetid(cur, userid, 1)
+
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+
+                        return []  # 👈 IMPORTANTE: no romper el flujo
+
+            except Exception as e:
+                print("Error parsing JSON:", e)
+
+    # otros errores reales
+    raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
 
     j = tweets_response.json()
     tweets_data.extend(j.get("data", []))
