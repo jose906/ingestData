@@ -167,8 +167,8 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
             except Exception as e:
                 print("Error parsing JSON:", e)
 
-    # otros errores reales
-    raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
+        # otros errores reales
+        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
 
     j = tweets_response.json()
     tweets_data.extend(j.get("data", []))
