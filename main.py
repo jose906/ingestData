@@ -121,7 +121,7 @@ def bolivia_day_start_utc_iso():
 # ================== X API ==================
 
 
-def fetch_tweets_for_user(username: str, last_tweetid ):
+def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
     params = {
         "query": f"from:{username}",
         "max_results": 100,
@@ -141,6 +141,10 @@ def fetch_tweets_for_user(username: str, last_tweetid ):
     tweets_data = []
     tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
     if tweets_response.status_code != 200:
+        if tweets_response.status_code == 400:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            update_last_tweetid(cur,userid,1 )
         raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
 
     j = tweets_response.json()
@@ -280,7 +284,7 @@ def ingest_handler():
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
-            tweets = fetch_tweets_for_user(username, last_tid)
+            tweets = fetch_tweets_for_user(username, last_tid,user_id)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
