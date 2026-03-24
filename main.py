@@ -387,9 +387,12 @@ def predict():
 def get_state(cursor, key: str, default=None):
     cursor.execute("SELECT v FROM ingest_state WHERE k=%s", (key,))
     row = cursor.fetchone()
-    return row[0] if row else default
+    value = row[0] if row else default
+    if value == "":
+        return default
+    return value
 
-def set_state(cursor, key: str, value: str):
+def set_state(cursor, key: str, value):
     cursor.execute(
         "INSERT INTO ingest_state (k, v) VALUES (%s, %s) "
         "ON DUPLICATE KEY UPDATE v=VALUES(v)",
@@ -528,9 +531,7 @@ def ingest_replies_handler():
         # 3) procesar pocas cuentas por corrida (anti-timeout)
         batch_size = 1
         start_idx = int(get_state(cursor, "replies_user_idx", "0") or "0")
-        if start_idx == "":
-            start_idx = 0
-            
+      
             
 
         selected = []
@@ -551,54 +552,59 @@ def ingest_replies_handler():
             since_key = f"replies_since_id:{uname}"
             since_id = get_state(cursor, since_key, None)
 
-            # paginar máximo 2 páginas por usuario (corto)
             next_token = None
             for page in range(2):
                 data = x_search_replies_to_username(uname, since_id, next_token)
-                
 
                 if isinstance(data, dict) and data.get("since_id_expired"):
                     print(f"⚠️ since_id expirado para {uname}: {since_id}")
-                    set_state(cursor, since_key, "")   # o None si tu tabla lo maneja
+                    set_state(cursor, since_key, None)
                     since_id = None
                     next_token = None
                     data = x_search_replies_to_username(uname, None, None)
 
                 if isinstance(data, dict) and data.get("rate_limited"):
                     rate_limited = True
-                    details.append({"user": uname, "rate_limited": True, "retry_after": data.get("retry_after")})
+                    details.append({
+                        "user": uname,
+                        "rate_limited": True,
+                        "retry_after": data.get("retry_after")
+                    })
                     break
 
                 if isinstance(data, dict) and data.get("error"):
-                    details.append({"user": uname, "error": True, "status": data.get("status"), "body": data.get("body")})
+                    details.append({
+                        "user": uname,
+                        "error": True,
+                        "status": data.get("status"),
+                        "body": data.get("body")
+                    })
                     break
 
                 tweets = data.get("data", []) if isinstance(data, dict) else []
                 if not tweets:
                     break
 
-                # filtrar por conversation_id ∈ root_ids
                 max_seen = since_id
                 for tw in tweets:
                     conv_id = str(tw.get("conversation_id") or "")
                     if conv_id and conv_id in root_ids:
                         insert_reply(cursor, conv_id, tw)
                         saved += 1
-                    # actualizar max id visto para since_id (son strings numéricas)
+
                     tid = str(tw["id"])
-                    if (max_seen is None) or (int(tid) > int(max_seen)):
+                    if max_seen in (None, ""):
+                        max_seen = tid
+                    elif int(tid) > int(max_seen):
                         max_seen = tid
 
-                if max_seen:
+                if max_seen not in (None, ""):
                     set_state(cursor, since_key, str(max_seen))
 
                 meta = data.get("meta", {})
                 next_token = meta.get("next_token")
                 if not next_token:
                     break
-
-            if rate_limited:
-                break
 
         conn.commit()
         return jsonify({
