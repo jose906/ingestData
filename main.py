@@ -528,6 +528,10 @@ def ingest_replies_handler():
         # 3) procesar pocas cuentas por corrida (anti-timeout)
         batch_size = 1
         start_idx = int(get_state(cursor, "replies_user_idx", "0") or "0")
+        if start_idx == "":
+            start_idx = 0
+            
+            
 
         selected = []
         for i in range(batch_size):
