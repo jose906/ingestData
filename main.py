@@ -102,6 +102,8 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         int(tweetuser_pk_id),
     )
     cur.execute(sql, params)
+    
+
     return 1
 
 
@@ -166,6 +168,11 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
 
             except Exception as e:
                 print("Error parsing JSON:", e)
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
 
         # otros errores reales
         raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
@@ -258,11 +265,10 @@ def get_users(limit=1):
         print(f"Error fetching users: {e}")
         return []
     finally:
+        if cur:
+            cur.close()
         if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            conn.close()
 
 
 def update_all():
