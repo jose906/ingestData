@@ -164,7 +164,7 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
                         cur.close()
                         conn.close()
 
-                        return [], False  # 👈 IMPORTANTE: no romper el flujo
+                        return []  # 👈 IMPORTANTE: no romper el flujo
 
             except Exception as e:
                 print("Error parsing JSON:", e)
@@ -182,7 +182,7 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
 
    
 
-    return tweets_data, True
+    return tweets_data
     
 '''
 def fetch_tweets_for_user(user_id: str, last_tweetid):
@@ -313,17 +313,15 @@ def ingest_handler():
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
-            tweets, bool = fetch_tweets_for_user(username, last_tid,user_id)
-            saved = 0
+            tweets = fetch_tweets_for_user(username, last_tid,user_id)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
-                if bool:
-                    update_last_tweetid(cur, u["idTweetUser"], last_tid )
-                    print("hola mundo")
-                    conn.commit()
+                
+                update_last_tweetid(cur, u["idTweetUser"], last_tid )
+                conn.commit()
                 continue
 
-           
+            saved = 0
             for t in tweets:
                 saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
 
@@ -331,7 +329,6 @@ def ingest_handler():
             max_tid = max_tweet_id(tweets)
             if max_tid:
                 update_last_tweetid(cur, u["idTweetUser"], max_tid)
-                print("que paso aqio")
 
             conn.commit()
 
