@@ -164,7 +164,7 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
                         cur.close()
                         conn.close()
 
-                        return []  # 👈 IMPORTANTE: no romper el flujo
+                        return [], False  # 👈 IMPORTANTE: no romper el flujo
 
             except Exception as e:
                 print("Error parsing JSON:", e)
@@ -182,7 +182,7 @@ def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
 
    
 
-    return tweets_data
+    return tweets_data, True
     
 '''
 def fetch_tweets_for_user(user_id: str, last_tweetid):
@@ -313,7 +313,7 @@ def ingest_handler():
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
-            tweets = fetch_tweets_for_user(username, last_tid,user_id)
+            tweets, bool = fetch_tweets_for_user(username, last_tid,user_id)
             saved = 0
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
@@ -322,16 +322,16 @@ def ingest_handler():
                 conn.commit()
                 continue
 
-            else:    
-                for t in tweets:
-                    saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
+           
+            for t in tweets:
+                saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
 
-                # actualiza last_tweetid
-                max_tid = max_tweet_id(tweets)
-                if max_tid:
-                    update_last_tweetid(cur, u["idTweetUser"], max_tid)
+            # actualiza last_tweetid
+            max_tid = max_tweet_id(tweets)
+            if max_tid:
+                update_last_tweetid(cur, u["idTweetUser"], max_tid)
 
-                conn.commit()
+            conn.commit()
 
             total_saved += saved
             per_user_stats.append({
