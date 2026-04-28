@@ -317,9 +317,10 @@ def ingest_handler():
             saved = 0
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
-                
-                update_last_tweetid(cur, u["idTweetUser"], last_tid )
-                conn.commit()
+                if bool:
+                    update_last_tweetid(cur, u["idTweetUser"], last_tid )
+                    print("hola mundo")
+                    conn.commit()
                 continue
 
            
@@ -330,6 +331,7 @@ def ingest_handler():
             max_tid = max_tweet_id(tweets)
             if max_tid:
                 update_last_tweetid(cur, u["idTweetUser"], max_tid)
+                print("que paso aqio")
 
             conn.commit()
 
