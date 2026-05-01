@@ -378,7 +378,7 @@ def ingest_handler():
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
-            tweets = fetch_tweets_for_user2(username, last_tid,user_id)
+            tweets = fetch_tweets_for_user(username, last_tid,user_id)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
