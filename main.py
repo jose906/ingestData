@@ -122,6 +122,71 @@ def bolivia_day_start_utc_iso():
 
 # ================== X API ==================
 
+def fetch_tweets_for_user2(username:str, user_id: str, last_tweetid: str):
+    
+    params = {
+        "query": f"from:{username}",
+        "max_results": 100,
+        "tweet.fields": "created_at,text,entities,author_id",
+        
+    }
+    now = datetime.now(timezone.utc)
+    safe_now = now - timedelta(seconds=60)
+
+    start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if last_tweetid == '1':
+        
+        params["start_time"] = start_today.isoformat().replace("+00:00", "Z"),
+        params["end_time"] = safe_now.isoformat().replace("+00:00", "Z"),
+    elif last_tweetid == '0':
+        pass
+    else:
+        params["since_id"] = str(last_tweetid)
+        
+    tweets_data = []
+    tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
+    if tweets_response.status_code != 200:
+
+        if tweets_response.status_code == 400:
+            try:
+                error_json = tweets_response.json()
+
+                errors = error_json.get("errors", [])
+                if errors:
+                    message = errors[0].get("message", "")
+
+                    if "since_id" in message:
+                        print(f"⚠️ since_id inválido para user {user_id}, reseteando...")
+
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+
+                        update_last_tweetid(cur, user_id, 1)
+
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+
+                        return []  # 👈 IMPORTANTE: no romper el flujo
+
+            except Exception as e:
+                print("Error parsing JSON:", e)
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+        # otros errores reales
+        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
+
+    j = tweets_response.json()
+    tweets_data.extend(j.get("data", []))
+
+   
+
+    return tweets_data
+    
 
 def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
     params = {
@@ -313,7 +378,7 @@ def ingest_handler():
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
-            tweets = fetch_tweets_for_user(username, last_tid,user_id)
+            tweets = fetch_tweets_for_user2(username, last_tid,user_id)
             if not tweets:
                 # si no hay tweets, igual marca procesado si quieres evitar loop infinito
                 
