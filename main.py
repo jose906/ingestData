@@ -9,6 +9,9 @@ import mysql.connector
 from mysql.connector import Error
 import time
 from dateutil import parser as dtparser
+import hmac
+import hashlib
+import base64
 
 
 # ================== CONFIG ==================
@@ -28,7 +31,8 @@ DB_CONFIG = {
 
 #TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
 TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAN9WpgEAAAAAHarp9HjcuJFZ4wtx1DtpsP8Z93A%3DC3AEHMO2YXaGFFgblPEdkYTGhBne75WLUlG5Mc95FGKlR003vg'
-VERIFY_TOKEN = 'NGFmNzNjNjMtMzk3YS00OTMyLTlmZGQtMWRhMDY4MjlhMGIy&nonce=MTc3OTEyMTQzMTY5Ng'
+CONSUMER_SECRET = "5VPRB4LWNpovSk0uTTU4ShoJ4"
+CONSUMER_SECRET_KEY = "IqsEGFOMKibM0X8VYydYpbkd0RONJNTu2ftWHs18ZV533RrUhu"
 if not TWITTER_BEARER_TOKEN:
     raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
 
@@ -699,28 +703,30 @@ def ingest_replies_handler():
 
 
 @app.route("/webhook", methods=['GET', 'POST'])
-def webhook():
-    if request.method == 'GET':
-        mode = request.args.get('hub.mode')
-        token = request.args.get('hub.verify_token')
-        challenge = request.args.get('hub.challenge')
+def x_webhook():
+    # CRC validation
+    if request.method == "GET":
+        crc_token = request.args.get("crc_token")
 
-        if mode == 'subscribe' and token == VERIFY_TOKEN:
-            print("Webhook verificado correctamente")
-            return challenge, 200
-        else:
-            return "Error de verificación", 403
+        sha256_hash_digest = hmac.new(
+            CONSUMER_SECRET.encode("utf-8"),
+            msg=crc_token.encode("utf-8"),
+            digestmod=hashlib.sha256
+        ).digest()
 
-    elif request.method == 'POST':
-        data = requests.request.get_json()
-        entry = data.get("entry", [])[0]
-        changes = entry.get("changes", [])[0]
-        value = changes.get("value", {})
-        
-        #print("Mensaje recibido:")
-        #print(data)
-        #chat.manage_bot(data)
-        return "Evento recibido", 200
+        response_token = "sha256=" + base64.b64encode(sha256_hash_digest).decode("utf-8")
+
+        return jsonify({
+            "response_token": response_token
+        })
+
+    # Event delivery
+    if request.method == "POST":
+        data = request.json
+        print("Evento recibido:", data)
+
+        # Aquí guardas en MySQL, procesas menciones, etc.
+        return "OK", 200
 
 
 if __name__ == "__main__":
