@@ -1,7 +1,7 @@
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify
+from flask import Flask, jsonify,request
 import requests
 import sklearn
 import MLModel
@@ -28,7 +28,7 @@ DB_CONFIG = {
 
 #TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
 TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAN9WpgEAAAAAHarp9HjcuJFZ4wtx1DtpsP8Z93A%3DC3AEHMO2YXaGFFgblPEdkYTGhBne75WLUlG5Mc95FGKlR003vg'
-
+VERIFY_TOKEN = 'NGFmNzNjNjMtMzk3YS00OTMyLTlmZGQtMWRhMDY4MjlhMGIy&nonce=MTc3OTEyMTQzMTY5Ng'
 if not TWITTER_BEARER_TOKEN:
     raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
 
@@ -374,7 +374,7 @@ def ingest_handler():
             username = (u.get("TweetUser") or "").strip()
             last_tid = u.get("last_tweetid")
             last_tid = str(last_tid) if last_tid not in (None, "") else None
-            user_id = str(u["idTweetUser"])
+            user_id = str(u["idTweetUser"]) 
 
             #tweets = fetch_tweets_for_user(user_id, last_tid)
 
@@ -697,6 +697,30 @@ def ingest_replies_handler():
         except Exception:
             pass
 
+
+@app.route("/webhook", methods=['GET', 'POST'])
+def webhook():
+    if request.method == 'GET':
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
+
+        if mode == 'subscribe' and token == VERIFY_TOKEN:
+            print("Webhook verificado correctamente")
+            return challenge, 200
+        else:
+            return "Error de verificación", 403
+
+    elif request.method == 'POST':
+        data = requests.request.get_json()
+        entry = data.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        
+        #print("Mensaje recibido:")
+        #print(data)
+        #chat.manage_bot(data)
+        return "Evento recibido", 200
 
 
 if __name__ == "__main__":
