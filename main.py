@@ -702,22 +702,24 @@ def ingest_replies_handler():
             pass
 
 
-@app.route("/webhook/x", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         crc_token = request.args.get("crc_token")
 
-        digest = hmac.new(
-            CONSUMER_SECRET_KEY.encode("utf-8"),
-            crc_token.encode("utf-8"),
-            hashlib.sha256
+        hash_digest = hmac.new(
+            CONSUMER_SECRET.encode(),
+            msg=crc_token.encode(),
+            digestmod=hashlib.sha256
         ).digest()
 
-        response_token = "sha256=" + base64.b64encode(digest).decode("utf-8")
+        response_token = "sha256=" + base64.b64encode(hash_digest).decode()
 
-        return jsonify({
-            "response_token": response_token
-        })
+        return jsonify({"response_token": response_token})
+
+    if request.method == "POST":
+        print(request.json)  # aquí llegan los eventos
+        return "OK", 200
 
 
 if __name__ == "__main__":
