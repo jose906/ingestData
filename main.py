@@ -708,7 +708,7 @@ def webhook():
         crc_token = request.args.get("crc_token")
 
         hash_digest = hmac.new(
-            CONSUMER_SECRET.encode(),
+            CONSUMER_SECRET_KEY.encode(),
             msg=crc_token.encode(),
             digestmod=hashlib.sha256
         ).digest()
