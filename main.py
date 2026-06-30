@@ -12,6 +12,7 @@ from dateutil import parser as dtparser
 import hmac
 import hashlib
 import base64
+import embeddings
 
 
 # ================== CONFIG ==================
@@ -455,6 +456,19 @@ def predict():
     texto = "Me encanta"
     print(MLModel.predecir_categoria(texto)[0])
     print(MLModel.get_sentiment(texto)[0])
+    
+    
+    
+    @app.route("/create_embeddings", methods=["GET"])
+    def create_embeddings():
+        saved = embeddings.insert_embeddings()
+        if saved == 0:
+            return jsonify({"ok": True, "msg": "No hay tweets sin embeddings"}), 200
+        else:
+            
+            return jsonify({"ok": True, "msg": f"Hay {len(saved)} tweets sin embeddings"}), 200
+
+            return jsonify({"ok": True, "msg": f"Embeddings creados para {saved} tweets"}), 200
 
 
 # ================== REPLIES INGEST ==================
