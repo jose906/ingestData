@@ -459,16 +459,14 @@ def predict():
     
     
     
-    @app.route("/create_embeddings", methods=["GET"])
-    def create_embeddings():
+@app.route("/create_embeddings", methods=["GET"])
+def create_embeddings():
         saved = embeddings.insert_embeddings()
         if saved == 0:
             return jsonify({"ok": True, "msg": "No hay tweets sin embeddings"}), 200
         else:
             
             return jsonify({"ok": True, "msg": f"Hay {len(saved)} tweets sin embeddings"}), 200
-
-            return jsonify({"ok": True, "msg": f"Embeddings creados para {saved} tweets"}), 200
 
 
 # ================== REPLIES INGEST ==================
