@@ -4,5 +4,6 @@ mysql-connector-python
 scikit-learn
 joblib
 numpy
+sentence-transformers
 python-dateutil
 
