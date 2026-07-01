@@ -12,7 +12,7 @@ from dateutil import parser as dtparser
 import hmac
 import hashlib
 import base64
-import embeddings
+
 
 
 # ================== CONFIG ==================
@@ -310,7 +310,7 @@ def update_last_tweetid(cur, idTweetUser, last_tweetid):
         print(f"⚠️ No se actualizó ningún registro para idTweetUser={idTweetUser}")
         return False
 
-    
+  
 
 def max_tweet_id(tweets):
     if not tweets:
