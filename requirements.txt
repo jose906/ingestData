@@ -5,4 +5,4 @@ scikit-learn
 joblib
 numpy
 python-dateutil
-sentence-transformers
+
