@@ -1,7 +1,7 @@
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify,request
+from flask import Flask, jsonify, request
 import requests
 import sklearn
 import MLModel
