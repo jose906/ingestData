@@ -6,4 +6,5 @@ joblib
 numpy
 sentence-transformers
 python-dateutil
+gunicorn
 
