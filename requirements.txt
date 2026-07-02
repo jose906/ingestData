@@ -1,7 +1,7 @@
 Flask
 requests
 mysql-connector-python
-scikit-learn==1.6.5
+scikit-learn==1.7.2
 joblib
 numpy
 gunicorn
