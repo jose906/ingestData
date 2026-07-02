@@ -1,7 +1,7 @@
 Flask
 requests
 mysql-connector-python
-scikit-learn
+scikit-learn=1.5.2
 joblib
 numpy
 python-dateutil
