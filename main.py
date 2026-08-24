@@ -732,7 +732,7 @@ def select_topics():
             "ok": True,
             "tweets_no_asignados": len(df_no_asignados),
             "tweets_asignados": len(df_asignados),
-            "detalle": df_no_asignados.to_dict(orient="records")
+            
         }), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
