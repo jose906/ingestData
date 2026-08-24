@@ -6,18 +6,30 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
 import numpy as np
+import os
 
 
 URL_REGEX = re.compile(r"https?://\S+|www\.\S+")
 UMBRAL = 0.8
 
-DB_CONFIG = {
+"""DB_CONFIG = {
     "host": "34.69.57.221",
     "user": "admin",
     "password": "Admin123!",
     "database": "Analisis",
     "port": 3306,
+}"""
+
+DB_CONFIG = {
+            # IP pública o nombre interno de Cloud SQL
+    "user": os.environ.get("DB_USER"),
+    "password": os.environ.get("DB_PASS"),
+    "database": os.environ.get("DB_NAME"),
+    "unix_socket": f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}",
+    "charset": "utf8mb4",
+    "port": "3306",
 }
+  
 
 TOPICS_ESPECIALES = [
     "__SOLO_LINK__",
