@@ -12,6 +12,7 @@ from dateutil import parser as dtparser
 import hmac
 import hashlib
 import base64
+from selectTopics import classify_tweets
 
 
 
@@ -722,6 +723,20 @@ def webhook():
         print(request.json)  # aquí llegan los eventos
         return "OK", 200
 
+
+@app.route("/selectTopics", methods=["GET"])
+def select_topics():
+    try:
+        df_no_asignados , df_asignados = classify_tweets()
+        return jsonify({
+            "ok": True,
+            "tweets_no_asignados": len(df_no_asignados),
+            "tweets_asignados": len(df_asignados),
+            "detalle": df_no_asignados.to_dict(orient="records")
+        }), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    
 
 if __name__ == "__main__":
     # Para correrlo localmente
