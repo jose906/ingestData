@@ -5,6 +5,7 @@ scikit-learn==1.7.2
 joblib
 numpy
 gunicorn
+pandas
 python-dateutil
 
 
