@@ -6,8 +6,6 @@ from google import genai
 
 
 
-
-
 DB_CONFIG = {
             # IP pública o nombre interno de Cloud SQL
     "user": os.environ.get("DB_USER"),
@@ -140,7 +138,7 @@ def insertar_nuevos_topicos():
 
             print(f"{i}/{len(topics_para_nombrar)} | Topic {topic_id}: {nombre}")
 
-            time.sleep(1)
+            
 
         except Exception as e:
             print(f"Error en topic {topic_id}: {e}")
