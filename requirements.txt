@@ -6,6 +6,7 @@ joblib
 numpy
 gunicorn
 pandas
+google-genai
 python-dateutil
 
 
