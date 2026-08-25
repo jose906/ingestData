@@ -44,6 +44,7 @@ def get_topics():
         ON tt.tweetid = tw.tweetid
     WHERE tp.topic_name LIKE '%NUEVO_CLUSTER%'
     ORDER BY tp.topic_id, tt.similarity DESC;
+    LIMIT 2
     """
 
     df_topics = pd.read_sql(query, connection)
