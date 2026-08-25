@@ -128,7 +128,7 @@ def insertar_nuevos_topicos():
     for topic_id, grupo in df_representativos.groupby("topic_id"):
         topics_para_nombrar[topic_id] = grupo["text"].tolist()
         if len(grupo) > 2:
-            break. 
+            break
 
     for i, (topic_id, tweets) in enumerate(topics_para_nombrar.items(), 1):
         try:
