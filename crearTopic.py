@@ -138,7 +138,7 @@ def insertar_nuevos_topicos():
 
             print(f"{i}/{len(topics_para_nombrar)} | Topic {topic_id}: {nombre}")
 
-            
+              
 
         except Exception as e:
             print(f"Error en topic {topic_id}: {e}")
