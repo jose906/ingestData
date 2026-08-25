@@ -113,10 +113,7 @@ def insert_tweets_topic(df):
     print(f"{len(data)} nombres actualizados.")
 
 
-def insertar_nuevos_topicos(df):
-    if df.empty:
-        print("No hay tweets para insertar")
-        return
+def insertar_nuevos_topicos():
     df_topics = get_topics()
     df_validos = df_topics
 

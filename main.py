@@ -13,7 +13,7 @@ import hmac
 import hashlib
 import base64
 from selectTopics import classify_tweets
-from crearTopic import insert_tweets_topic
+from crearTopic import insertar_nuevos_topicos
 
 
 
@@ -740,7 +740,7 @@ def select_topics():
 @app.route("/create_topics", methods=["GET"])
 def create_topics():
     try:  
-        insert_tweets_topic()
+        insertar_nuevos_topicos()
         
         return jsonify({"ok": True}), 200
     except Exception as e:
