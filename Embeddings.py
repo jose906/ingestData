@@ -600,7 +600,7 @@ def preparar_tweets_nuevo_topic(
 
 
 
-def main():
+if __name__ == "__main__":
     df_no_asignados = classify_tweets()
     df_clusters = detectar_nuevos_clusters(df_no_asignados)
     centroides_nuevos = calcular_centroides_nuevos(df_clusters)

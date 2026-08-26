@@ -740,8 +740,9 @@ def select_topics():
 @app.route("/create_topics", methods=["GET"])
 def create_topics():
     try:  
-        insertar_nuevos_topicos()
-        
+        a = insertar_nuevos_topicos()
+        if a is None:
+            return jsonify({"ok": True, "msg": "No hay topics para nombrar."}), 200
         return jsonify({"ok": True}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

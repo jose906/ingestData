@@ -124,7 +124,9 @@ def insertar_nuevos_topicos():
     print("Topics a nombrar:", df_representativos["topic_id"].nunique())
     resultados_nombres = []
     topics_para_nombrar = {}
-
+    if len(df_representativos) == 0:
+        print("No hay topics para nombrar.")
+        return None
     for topic_id, grupo in df_representativos.groupby("topic_id"):
         topics_para_nombrar[topic_id] = grupo["text"].tolist()
         if len(grupo) > 2:
