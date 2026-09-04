@@ -195,106 +195,93 @@ def fetch_tweets_for_user2(username:str, user_id: str, last_tweetid: str):
     return tweets_data
     
 
-def fetch_tweets_for_user(username: str, last_tweetid, userid=None ):
+def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None):
     params = {
         "query": f"from:{username}",
         "max_results": 100,
         "tweet.fields": "created_at,text,entities,author_id",
     }
-    a = False
-    
 
-    if not last_tweetid or last_tweetid in (None, "") or last_tweetid == 1:
-        a = True
-    else:
-        if int(last_tweetid) > 2031390546013978624:
-            params["since_id"] = str(last_tweetid)
-        else: 
-            a = True
+    # Si ya estamos recorriendo páginas anteriores,
+    # continuamos exactamente desde esa página.
+    if pagination_token:
+        params["next_token"] = pagination_token
 
-    tweets_data = []
-    tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
-    if tweets_response.status_code != 200:
-
-        if tweets_response.status_code == 400:
-            try:
-                error_json = tweets_response.json()
-
-                errors = error_json.get("errors", [])
-                if errors:
-                    message = errors[0].get("message", "")
-
-                    if "since_id" in message:
-                        print(f"⚠️ since_id inválido para user {userid}, reseteando...")
-
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-
-                        update_last_tweetid(cur, userid, 1)
-
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-
-                        return []  # 👈 IMPORTANTE: no romper el flujo
-
-            except Exception as e:
-                print("Error parsing JSON:", e)
-            finally:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
-
-        # otros errores reales
-        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
-
-    j = tweets_response.json()
-    tweets_data.extend(j.get("data", []))
-
-   
-
-    return tweets_data
-    
-'''
-def fetch_tweets_for_user(user_id: str, last_tweetid):
-
-    params = {
-        "max_results": 100,
-        "tweet.fields": "created_at,text,entities,author_id"
-    }
-
-    if last_tweetid not in (None, "", "1"):
+    # Si NO estamos paginando, comenzamos desde el último tweet guardado.
+    elif last_tweetid not in (None, "", "0", "1", 0, 1):
         params["since_id"] = str(last_tweetid)
 
-    url = TWEETS_URL.format(user_id)
+    try:
+        response = requests.get(
+            TWEETS_URL,
+            headers=headers,
+            params=params,
+            timeout=20
+        )
 
-    tweets_data = []
-    next_token = None
+    except requests.RequestException as e:
+        raise Exception(
+            f"Error de conexión con X para @{username}: {str(e)}"
+        )
 
-    while True:
+    # Rate limit
+    if response.status_code == 429:
+        retry_after = response.headers.get("retry-after")
 
-        if next_token:
-            params["pagination_token"] = next_token
+        return {
+            "ok": False,
+            "rate_limit": True,
+            "tweets": [],
+            "next_token": pagination_token,
+            "error": f"Rate limit. retry_after={retry_after}"
+        }
 
-        r = requests.get(url, headers=headers, params=params, timeout=20)
+    # since_id inválido
+    if response.status_code == 400:
+        try:
+            error_data = response.json()
+            error_text = str(error_data)
+        except Exception:
+            error_text = response.text
 
-        if r.status_code != 200:
-            raise Exception(f"Error {r.status_code}: {r.text}")
+        if "since_id" in error_text:
+            return {
+                "ok": False,
+                "rate_limit": False,
+                "tweets": [],
+                "next_token": None,
+                "reset_since_id": True,
+                "error": error_text
+            }
 
-        j = r.json()
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "rate_limit": False,
+            "tweets": [],
+            "next_token": pagination_token,
+            "error": (
+                f"X API error {response.status_code}: "
+                f"{response.text}"
+            )
+        }
 
-        tweets = j.get("data", [])
-        tweets_data.extend(tweets)
+    data = response.json()
 
-        meta = j.get("meta", {})
-        next_token = meta.get("next_token")
+    tweets = data.get("data", [])
 
-        if not next_token:
-            break
+    meta = data.get("meta", {})
 
-    return tweets_data
-'''
+    next_token = meta.get("next_token")
+
+    return {
+        "ok": True,
+        "rate_limit": False,
+        "reset_since_id": False,
+        "tweets": tweets,
+        "next_token": next_token
+    }
+    
     
 def update_last_tweetid(cur, idTweetUser, last_tweetid):
     sql = """
@@ -313,32 +300,73 @@ def update_last_tweetid(cur, idTweetUser, last_tweetid):
         return False
 
   
+def update_pagination_token(cursor, user_id, pagination_token):
+    sql = """
+        UPDATE TweetUser
+        SET pagination_token = %s
+        WHERE idTweetUser = %s
+    """
 
-def max_tweet_id(tweets):
-    if not tweets:
+    cursor.execute(
+        sql,
+        (
+            pagination_token,
+            user_id
+        )
+    )
+
+
+def max_tweet_id(cursor, user_id):
+    cursor.execute(
+        """
+        SELECT MAX(CAST(tweetid AS UNSIGNED)) AS max_id
+        FROM Tweets
+        WHERE TweetUser_idTweetUser = %s
+        """,
+        (user_id,)
+    )
+
+    row = cursor.fetchone()
+
+    if not row:
         return None
-    m = max(int(t["id"]) for t in tweets if "id" in t)
-    return str(m)
+
+    return row["max_id"]
 
 def get_users(limit=1):
     conn = None
+    cur = None
+
     try:
         conn = get_db_connection()
         cur = conn.cursor(dictionary=True)
-        cur.execute("""
-            SELECT idTweetUser, TweetUser, last_tweetid, tweets_procesados
+
+        sql = """
+            SELECT
+                idTweetUser,
+                TweetUser,
+                last_tweetid,
+                tweets_procesados,
+                pagination_token
             FROM TweetUser
             WHERE tweets_procesados = 0
             ORDER BY idTweetUser ASC
             LIMIT %s
-        """, (limit,))
-        return cur.fetchall()
+        """
+
+        cur.execute(sql, (limit,))
+        users = cur.fetchall()
+
+        return users
+
     except Exception as e:
-        print(f"Error fetching users: {e}")
-        return []
+        print(f"❌ Error obteniendo usuarios: {e}")
+        raise
+
     finally:
         if cur:
             cur.close()
+
         if conn:
             conn.close()
 
@@ -364,70 +392,181 @@ def update_all():
 @app.route("/ingest", methods=["GET"])
 def ingest_handler():
     conn = None
+    cur = None
+
     try:
         conn = get_db_connection()
-        cur = conn.cursor()  # cursor normal para inserts/updates
+        cur = conn.cursor(dictionary=True)
 
-        users = get_users()
+        users = get_users(limit=1)
+
         if not users:
             update_all()
-            users = get_users()
+            users = get_users(limit=1)
 
-        total_saved = 0
-        per_user_stats = []
+        if not users:
+            return jsonify({
+                "ok": True,
+                "message": "No hay usuarios para procesar"
+            }), 200
 
-        for u in users:
-            tweetuser_pk_id = int(u["idTweetUser"])
-            username = (u.get("TweetUser") or "").strip()
-            last_tid = u.get("last_tweetid")
-            last_tid = str(last_tid) if last_tid not in (None, "") else None
-            user_id = str(u["idTweetUser"]) 
+        user = users[0]
 
-            #tweets = fetch_tweets_for_user(user_id, last_tid)
+        user_id = user["idTweetUser"]
+        username = user["TweetUser"]
+        last_tweetid = user["last_tweetid"]
+        pagination_token = user["pagination_token"]
 
-            tweets = fetch_tweets_for_user(username, last_tid,user_id)
-            if not tweets:
-                # si no hay tweets, igual marca procesado si quieres evitar loop infinito
-                
-                update_last_tweetid(cur, u["idTweetUser"], last_tid )
+        print(
+            f"Procesando @{username} | "
+            f"last_tweetid={last_tweetid} | "
+            f"pagination={bool(pagination_token)}"
+        )
+
+        resultado = fetch_tweets_for_user(
+            username=username,
+            last_tweetid=last_tweetid,
+            pagination_token=pagination_token
+        )
+
+        # ----------------------------------------
+        # ERROR / RATE LIMIT
+        # ----------------------------------------
+
+        if not resultado["ok"]:
+
+            if resultado.get("rate_limit"):
+                return jsonify({
+                    "ok": False,
+                    "user": username,
+                    "rate_limit": True,
+                    "error": resultado.get("error")
+                }), 429
+
+            if resultado.get("reset_since_id"):
+
+                cur.execute(
+                    """
+                    UPDATE TweetUser
+                    SET
+                        last_tweetid = NULL,
+                        pagination_token = NULL
+                    WHERE idTweetUser = %s
+                    """,
+                    (user_id,)
+                )
+
                 conn.commit()
-                continue
 
-            saved = 0
-            for t in tweets:
-                saved += insert_or_update_tweet(cur, t, tweetuser_pk_id)
+                return jsonify({
+                    "ok": False,
+                    "user": username,
+                    "reset_since_id": True,
+                    "message": "since_id inválido. Se reinició el estado de esta cuenta."
+                }), 200
 
-            # actualiza last_tweetid
-            max_tid = max_tweet_id(tweets)
-            if max_tid:
-                update_last_tweetid(cur, u["idTweetUser"], max_tid)
+            return jsonify({
+                "ok": False,
+                "user": username,
+                "error": resultado.get("error")
+            }), 500
+
+        tweets = resultado["tweets"]
+        next_token = resultado["next_token"]
+
+        guardados = 0
+
+        # ----------------------------------------
+        # GUARDAR TWEETS DE ESTA PÁGINA
+        # ----------------------------------------
+
+        for tweet in tweets:
+            insert_or_update_tweet(
+                cur,
+                tweet,
+                user_id
+            )
+
+            guardados += 1
+
+        # ----------------------------------------
+        # TODAVÍA QUEDAN MÁS PÁGINAS
+        # ----------------------------------------
+
+        if next_token:
+
+            update_pagination_token(
+                cur,
+                user_id,
+                next_token
+            )
 
             conn.commit()
 
-            total_saved += saved
-            per_user_stats.append({
-                "username": username,
-                "tweets_guardados": saved,
-                "last_tweetid": max_tid
-            })
+            return jsonify({
+                "ok": True,
+                "user": username,
+                "tweets_recibidos": len(tweets),
+                "tweets_guardados": guardados,
+                "pagination_pending": True,
+                "message": "Página guardada. La cuenta continuará en la siguiente ejecución."
+            }), 200
+
+        # ----------------------------------------
+        # YA TERMINAMOS TODAS LAS PÁGINAS
+        # ----------------------------------------
+
+        nuevo_last_tweetid = max_tweet_id(
+            cur,
+            user_id
+        )
+
+        cur.execute(
+            """
+            UPDATE TweetUser
+            SET
+                last_tweetid = %s,
+                pagination_token = NULL,
+                tweets_procesados = 1
+            WHERE idTweetUser = %s
+            """,
+            (
+                str(nuevo_last_tweetid) if nuevo_last_tweetid else last_tweetid,
+                user_id
+            )
+        )
+
+        conn.commit()
 
         return jsonify({
             "ok": True,
-            "procesados": len(per_user_stats),
-            "tweets_guardados": total_saved,
-            "detalle": per_user_stats
+            "user": username,
+            "tweets_recibidos": len(tweets),
+            "tweets_guardados": guardados,
+            "pagination_pending": False,
+            "last_tweetid": nuevo_last_tweetid,
+            "message": "Cuenta procesada completamente."
         }), 200
 
     except Exception as e:
+
         if conn:
-            try: conn.rollback()
-            except Exception: pass
-        return jsonify({"ok": False, "error": str(e)}), 500
+            conn.rollback()
+
+        print(f"❌ Error ingest: {e}")
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
 
     finally:
+
+        if cur:
+            cur.close()
+
         if conn:
-            try: conn.close()
-            except Exception: pass
+            conn.close()
 
 @app.route("/test", methods=["GET"])
 def health():
