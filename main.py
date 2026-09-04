@@ -76,44 +76,248 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
     created_at = tweet.get("created_at")
 
     created_dt = None
+
     if created_at:
         try:
-            created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            created_dt = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            )
         except Exception:
             created_dt = None
 
     url = f"https://twitter.com/i/web/status/{tweet_id}"
 
-    sql = """
-    INSERT INTO Tweets
-      (tweetid, text, created, url, sentimiento, categoria,
-       Lugar, Persona, Organizacion, Locacion, Otros, TweetUser_idTweetUser)
-    VALUES
-      (%s, %s, %s, %s, %s, %s,
-       %s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-      text = VALUES(text),
-      created = VALUES(created),
-      url = VALUES(url),
-      TweetUser_idTweetUser = VALUES(TweetUser_idTweetUser)
-    """
+    # --------------------------------------------------
+    # 1. COMPROBAR SI EL TWEET YA EXISTE
+    # --------------------------------------------------
 
-    params = (
-        tweet_id,
-        text,
-        created_dt,
-        url,
-        MLModel.get_sentiment(text)[0],
-        MLModel.predecir_categoria(text)[0],
-        "", "", "", "", "",
-        int(tweetuser_pk_id),
+    cur.execute(
+        """
+        SELECT tweetid
+        FROM Tweets
+        WHERE tweetid = %s
+        LIMIT 1
+        """,
+        (tweet_id,)
     )
-    cur.execute(sql, params)
-    
+
+    existe = cur.fetchone()
+
+    # --------------------------------------------------
+    # 2. SI YA EXISTE, SOLO ACTUALIZAMOS DATOS BÁSICOS
+    # --------------------------------------------------
+
+    if existe:
+
+        cur.execute(
+            """
+            UPDATE Tweets
+            SET
+                text = %s,
+                created = %s,
+                url = %s,
+                TweetUser_idTweetUser = %s
+            WHERE tweetid = %s
+            """,
+            (
+                text,
+                created_dt,
+                url,
+                int(tweetuser_pk_id),
+                tweet_id
+            )
+        )
+
+        return 0
+
+    # --------------------------------------------------
+    # 3. SI ES NUEVO, RECIÉN EJECUTAMOS ML
+    # --------------------------------------------------
+
+    # --------------------------------------------------
+# 3. EJECUTAR ML
+#    Si falla, NO perdemos el tweet
+# --------------------------------------------------
+
+    ml_ok = True
+
+    try:
+        sentimiento = MLModel.get_sentiment(text)[0]
+    except Exception as e:
+        print(
+            f"⚠️ Error sentimiento tweet {tweet_id}: {e}"
+        )
+        sentimiento = ""
+        ml_ok = False
+
+    try:
+        categoria = MLModel.predecir_categoria(text)[0]
+    except Exception as e:
+        print(
+            f"⚠️ Error categoría tweet {tweet_id}: {e}"
+        )
+        categoria = ""
+        ml_ok = False
+
+    # --------------------------------------------------
+    # 4. GUARDAR EL TWEET IGUALMENTE
+    # --------------------------------------------------
+
+    cur.execute(
+        """
+        INSERT INTO Tweets
+        (
+            tweetid,
+            text,
+            created,
+            url,
+            sentimiento,
+            categoria,
+            Lugar,
+            Persona,
+            Organizacion,
+            Locacion,
+            Otros,
+            TweetUser_idTweetUser, 
+            procesado
+        )
+        VALUES
+        (
+            %s, %s, %s, %s,
+            %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s
+        )
+        """,
+        (
+            tweet_id,
+            text,
+            created_dt,
+            url,
+            sentimiento,
+            categoria,
+            "",
+            "",
+            "",
+            "",
+            "",
+            int(tweetuser_pk_id),
+            1 if ml_ok else 0
+        )
+    )
 
     return 1
 
 
+
+def reprocess_pending_tweets(limit=100):
+    conn = None
+    cur = None
+
+    procesados = 0
+    errores = 0
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+
+        # Buscar solamente tweets pendientes
+        cur.execute(
+            """
+            SELECT
+                tweetid,
+                text
+            FROM Tweets
+            WHERE procesado = 0
+            ORDER BY created ASC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+
+        tweets = cur.fetchall()
+
+        if not tweets:
+            return {
+                "ok": True,
+                "procesados": 0,
+                "errores": 0,
+                "message": "No hay tweets pendientes de procesamiento."
+            }
+
+        for tweet in tweets:
+
+            tweet_id = tweet["tweetid"]
+            text = tweet["text"] or ""
+
+            try:
+                sentimiento = MLModel.get_sentiment(text)[0]
+                categoria = MLModel.predecir_categoria(text)[0]
+
+                cur.execute(
+                    """
+                    UPDATE Tweets
+                    SET
+                        sentimiento = %s,
+                        categoria = %s,
+                        procesado = 1
+                    WHERE tweetid = %s
+                    """,
+                    (
+                        sentimiento,
+                        categoria,
+                        tweet_id
+                    )
+                )
+
+                procesados += 1
+
+            except Exception as e:
+                errores += 1
+
+                print(
+                    f"❌ Error reprocesando tweet "
+                    f"{tweet_id}: {e}"
+                )
+
+        conn.commit()
+
+        return {
+            "ok": True,
+            "procesados": procesados,
+            "errores": errores,
+            "total_encontrados": len(tweets)
+        }
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            f"❌ Error general reprocesando tweets: {e}"
+        )
+
+        return {
+            "ok": False,
+            "procesados": procesados,
+            "errores": errores,
+            "error": str(e)
+        }
+
+    finally:
+
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 # ================== TIME HELPERS ==================
 
@@ -323,15 +527,34 @@ def get_users(limit=1):
 
 
 def update_all():
-    
+    conn = None
+    cur = None
+
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE TweetUser SET tweets_procesados = 0")
+
+        cur.execute(
+            """
+            UPDATE TweetUser
+            SET tweets_procesados = 0
+            WHERE pagination_token IS NULL
+            """
+        )
+
         conn.commit()
+
     except Exception as e:
-        print(f"Error resetting users: {e}")
+        print(f"❌ Error reseteando usuarios: {e}")
+        raise
+
     finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
         if conn:
             try:
                 conn.close()
@@ -348,6 +571,19 @@ def ingest_handler():
     try:
         conn = get_db_connection()
         cur = conn.cursor(dictionary=True)
+        # Evita que dos ejecuciones de /ingest corran al mismo tiempo
+        cur.execute(
+            "SELECT GET_LOCK('netvora_tweet_ingest', 0) AS acquired"
+        )
+
+        lock_result = cur.fetchone()
+
+        if not lock_result or lock_result["acquired"] != 1:
+            return jsonify({
+                "ok": True,
+                "busy": True,
+                "message": "Ya existe otra ejecución de ingest en proceso."
+            }), 200
 
         users = get_users(limit=1)
 
@@ -374,11 +610,7 @@ def ingest_handler():
             f"pagination={bool(pagination_token)}"
         )
 
-        resultado = fetch_tweets_for_user(
-            username=username,
-            last_tweetid=last_tweetid,
-            pagination_token=pagination_token
-        )
+        resultado = fetch_tweets_for_user(username=username,last_tweetid=last_tweetid,pagination_token=pagination_token)
 
         # ----------------------------------------
         # ERROR / RATE LIMIT
@@ -400,8 +632,9 @@ def ingest_handler():
                     """
                     UPDATE TweetUser
                     SET
-                        last_tweetid = NULL,
-                        pagination_token = NULL
+                        last_tweetid = 1,
+                        pagination_token = NULL,
+                        tweets_procesados = 0
                     WHERE idTweetUser = %s
                     """,
                     (user_id,)
@@ -410,12 +643,15 @@ def ingest_handler():
                 conn.commit()
 
                 return jsonify({
-                    "ok": False,
+                    "ok": True,
                     "user": username,
                     "reset_since_id": True,
-                    "message": "since_id inválido. Se reinició el estado de esta cuenta."
-                }), 200
-
+                    "message": (
+                        "El since_id era inválido. "
+                        "La cuenta fue reiniciada y se procesará nuevamente "
+                        "desde la búsqueda reciente."
+                    )
+                    }), 200
             return jsonify({
                 "ok": False,
                 "user": username,
@@ -431,14 +667,26 @@ def ingest_handler():
         # GUARDAR TWEETS DE ESTA PÁGINA
         # ----------------------------------------
 
-        for tweet in tweets:
-            insert_or_update_tweet(
-                cur,
-                tweet,
-                user_id
-            )
+        errores_tweets = 0
 
-            guardados += 1
+        for tweet in tweets:
+
+            try:
+                nuevo = insert_or_update_tweet(
+                    cur,
+                    tweet,
+                    user_id
+                )
+
+                guardados += nuevo
+
+            except Exception as e:
+                errores_tweets += 1
+
+                print(
+                    f"❌ Error procesando tweet "
+                    f"{tweet.get('id')}: {e}"
+                )
 
         # ----------------------------------------
         # TODAVÍA QUEDAN MÁS PÁGINAS
@@ -446,11 +694,7 @@ def ingest_handler():
 
         if next_token:
 
-            update_pagination_token(
-                cur,
-                user_id,
-                next_token
-            )
+            update_pagination_token(cur,user_id,next_token)
 
             conn.commit()
 
@@ -458,6 +702,7 @@ def ingest_handler():
                 "ok": True,
                 "user": username,
                 "tweets_recibidos": len(tweets),
+                "tweets_con_error": errores_tweets,
                 "tweets_guardados": guardados,
                 "pagination_pending": True,
                 "message": "Página guardada. La cuenta continuará en la siguiente ejecución."
@@ -494,6 +739,7 @@ def ingest_handler():
             "user": username,
             "tweets_recibidos": len(tweets),
             "tweets_guardados": guardados,
+            "tweets_con_error": errores_tweets,
             "pagination_pending": False,
             "last_tweetid": nuevo_last_tweetid,
             "message": "Cuenta procesada completamente."
@@ -513,11 +759,25 @@ def ingest_handler():
 
     finally:
 
+        if cur and conn:
+            try:
+                cur.execute(
+                    "SELECT RELEASE_LOCK('netvora_tweet_ingest')"
+                )
+            except Exception:
+                pass
+
         if cur:
-            cur.close()
+            try:
+                cur.close()
+            except Exception:
+                pass
 
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 @app.route("/test", methods=["GET"])
 def health():
@@ -536,6 +796,23 @@ def health():
         except:
             pass
 
+
+@app.route("/reprocess", methods=["GET"])
+def reprocess_handler():
+    try:
+        resultado = reprocess_pending_tweets(limit=100)
+
+        status_code = 200 if resultado.get("ok") else 500
+
+        return jsonify(resultado), status_code
+
+    except Exception as e:
+        print(f"❌ Error en /reprocess: {e}")
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
 
 @app.route("/", methods=["GET"])
 def status():
