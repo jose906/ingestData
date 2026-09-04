@@ -220,6 +220,18 @@ def reprocess_pending_tweets(limit=100):
     try:
         conn = get_db_connection()
         cur = conn.cursor(dictionary=True)
+        cur.execute("""
+        SELECT
+            DATABASE() AS database_name,
+            @@hostname AS mysql_host,
+            COUNT(*) AS pendientes
+        FROM Tweets
+        WHERE procesado = 0
+        """)
+
+        debug_db = cur.fetchone()
+
+        print(f"DEBUG DB: {debug_db}")
 
         # Buscar solamente tweets pendientes
         cur.execute(
@@ -286,7 +298,11 @@ def reprocess_pending_tweets(limit=100):
             "ok": True,
             "procesados": procesados,
             "errores": errores,
-            "total_encontrados": len(tweets)
+            "total_encontrados": len(tweets),
+            "database": debug_db["database_name"],
+            "mysql_host": debug_db["mysql_host"],
+            "pendientes_antes": debug_db["pendientes"],
+            
         }
 
     except Exception as e:
@@ -335,7 +351,7 @@ def bolivia_day_start_utc_iso():
 def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None):
     params = {
         "query": f"from:{username}",
-        "max_results": 10,
+        "max_results": 100,
         "tweet.fields": "created_at,text,entities,author_id",
     }
    
