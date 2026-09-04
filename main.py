@@ -240,7 +240,7 @@ def reprocess_pending_tweets(limit=100):
                 tweetid,
                 text
             FROM Tweets
-            WHERE procesado = 0
+            WHERE ml_procesado = 0
             ORDER BY created ASC
             LIMIT %s
             """,
