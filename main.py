@@ -201,7 +201,7 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
         "max_results": 10,
         "tweet.fields": "created_at,text,entities,author_id",
     }
-
+   
     # Si ya estamos recorriendo páginas anteriores,
     # continuamos exactamente desde esa página.
     if pagination_token:
