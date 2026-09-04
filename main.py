@@ -198,7 +198,7 @@ def fetch_tweets_for_user2(username:str, user_id: str, last_tweetid: str):
 def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None):
     params = {
         "query": f"from:{username}",
-        "max_results": 100,
+        "max_results": 10,
         "tweet.fields": "created_at,text,entities,author_id",
     }
 
