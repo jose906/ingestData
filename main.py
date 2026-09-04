@@ -179,7 +179,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
             Locacion,
             Otros,
             TweetUser_idTweetUser, 
-            procesado
+            ml_procesado
         )
         VALUES
         (
@@ -272,7 +272,7 @@ def reprocess_pending_tweets(limit=100):
                     SET
                         sentimiento = %s,
                         categoria = %s,
-                        procesado = 1
+                        ml_procesado = 1
                     WHERE tweetid = %s
                     """,
                     (
