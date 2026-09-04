@@ -127,73 +127,6 @@ def bolivia_day_start_utc_iso():
     return start_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-# ================== X API ==================
-
-def fetch_tweets_for_user2(username:str, user_id: str, last_tweetid: str):
-    
-    params = {
-        "query": f"from:{username}",
-        "max_results": 100,
-        "tweet.fields": "created_at,text,entities,author_id",
-        
-    }
-    now = datetime.now(timezone.utc)
-    safe_now = now - timedelta(seconds=60)
-
-    start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if last_tweetid == '1':
-        
-        params["start_time"] = start_today.isoformat().replace("+00:00", "Z"),
-        params["end_time"] = safe_now.isoformat().replace("+00:00", "Z"),
-    elif last_tweetid == '0':
-        pass
-    else:
-        params["since_id"] = str(last_tweetid)
-        
-    tweets_data = []
-    tweets_response = requests.get(TWEETS_URL, headers=headers, params=params)
-    if tweets_response.status_code != 200:
-
-        if tweets_response.status_code == 400:
-            try:
-                error_json = tweets_response.json()
-
-                errors = error_json.get("errors", [])
-                if errors:
-                    message = errors[0].get("message", "")
-
-                    if "since_id" in message:
-                        print(f"⚠️ since_id inválido para user {user_id}, reseteando...")
-
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-
-                        update_last_tweetid(cur, user_id, 1)
-
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-
-                        return []  # 👈 IMPORTANTE: no romper el flujo
-
-            except Exception as e:
-                print("Error parsing JSON:", e)
-            finally:
-                if cur:
-                    cur.close()
-                if conn:
-                    conn.close()
-
-        # otros errores reales
-        raise Exception(f"Error: {tweets_response.status_code} - {tweets_response.text}")
-
-    j = tweets_response.json()
-    tweets_data.extend(j.get("data", []))
-
-   
-
-    return tweets_data
-    
 
 def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None):
     params = {
@@ -204,12 +137,15 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
    
     # Si ya estamos recorriendo páginas anteriores,
     # continuamos exactamente desde esa página.
+    # Siempre mantenemos el since_id original
+    # durante todas las páginas de esta búsqueda.
+    if last_tweetid not in (None, "", "0", "1", 0, 1):
+        params["since_id"] = str(last_tweetid)
+
+    # Si estamos continuando una búsqueda,
+    # agregamos además el token de paginación.
     if pagination_token:
         params["next_token"] = pagination_token
-
-    # Si NO estamos paginando, comenzamos desde el último tweet guardado.
-    elif last_tweetid not in (None, "", "0", "1", 0, 1):
-        params["since_id"] = str(last_tweetid)
 
     try:
         response = requests.get(
@@ -273,6 +209,21 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
     meta = data.get("meta", {})
 
     next_token = meta.get("next_token")
+    print(
+    f"@{username} | "
+    f"token_entrada={pagination_token[:20] if pagination_token else None} | "
+    f"token_salida={next_token[:20] if next_token else None} | "
+    f"tweets={len(tweets)}")
+    
+    if (pagination_token and next_token and pagination_token == next_token):
+        return {
+            "ok": False,
+            "rate_limit": False,
+            "reset_since_id": False,
+            "tweets": [],
+            "next_token": pagination_token,
+            "error": "X devolvió el mismo pagination_token. Se detuvo para evitar un ciclo infinito."
+        }
 
     return {
         "ok": True,
