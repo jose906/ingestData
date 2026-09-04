@@ -221,12 +221,12 @@ def reprocess_pending_tweets(limit=100):
         conn = get_db_connection()
         cur = conn.cursor(dictionary=True)
         cur.execute("""
-        SELECT
-            DATABASE() AS database_name,
-            @@hostname AS mysql_host,
-            COUNT(*) AS pendientes
-        FROM Tweets
-        WHERE procesado = 0
+            SELECT
+                DATABASE() AS database_name,
+                @@hostname AS mysql_host,
+                COUNT(*) AS pendientes
+            FROM Tweets
+            WHERE ml_procesado = 0
         """)
 
         debug_db = cur.fetchone()
