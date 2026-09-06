@@ -1134,7 +1134,7 @@ def ingest_replies_handler():
             }), 200
 
         
-        root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
+        root_tweets = fetch_recent_root_tweets(cursor,hours_back=72,cap=5000)
 
         if not root_tweets:
             return jsonify({
