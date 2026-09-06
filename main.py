@@ -893,11 +893,7 @@ def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
         (hours_back, cap),
     )
     return set(str(r[0]) for r in cursor.fetchall())
-def fetch_recent_root_tweets(
-    cursor,
-    hours_back: int = 48,
-    cap: int = 5000
-):
+def fetch_recent_root_tweets(cursor,hours_back: int = 48,cap: int = 5000):
     cursor.execute(
         """
         SELECT
@@ -1036,11 +1032,7 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
 
     return r.json()
 
-def x_search_conversation(
-    root_tweetid: str,
-    since_id: str | None,
-    next_token: str | None
-):
+def x_search_conversation(root_tweetid: str,since_id: str | None,next_token: str | None):
     url = "https://api.twitter.com/2/tweets/search/recent"
 
     base_params = {
@@ -1064,12 +1056,7 @@ def x_search_conversation(
         params["next_token"] = next_token
 
     try:
-        r = requests.get(
-            url,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
+        r = requests.get(url,headers=headers,params=params,timeout=20)
 
     except requests.RequestException as e:
         return {
@@ -1134,7 +1121,7 @@ def ingest_replies_handler():
             }), 200
 
         
-        root_tweets = fetch_recent_root_tweets(cursor,hours_back=72,cap=5000)
+        root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
 
         if not root_tweets:
             
@@ -1145,7 +1132,7 @@ def ingest_replies_handler():
 
 
         # 3) Procesar pocos tweets por ejecución
-        batch_size = 1
+        batch_size = 5
 
         last_root_id = get_state(cursor,"replies_last_root_id",None)
 
@@ -1163,7 +1150,13 @@ def ingest_replies_handler():
         else:
             next_index = 0
 
-        selected.append(root_tweets[next_index])
+        for i in range(batch_size):
+            idx = next_index + i
+
+            if idx >= len(root_tweets):
+                break
+
+            selected.append(root_tweets[idx])
             
 
         saved = 0
@@ -1300,18 +1293,31 @@ def ingest_replies_handler():
                 set_state(cursor, max_seen_key, "")
 
                 break
+            
+            pagination_pending = get_state(cursor,f"replies_pagination_token:{root_tweetid}",None)
+
+            # Si este root falló, no avanzamos el cursor
+            # y tampoco procesamos los siguientes roots del batch.
+            if processing_failed:
+                break
+
+            # Si todavía tiene páginas pendientes,
+            # dejamos el cursor antes de este root para continuarlo
+            # en la próxima ejecución.
+            if pagination_pending:
+                break
+
+            # Root completamente terminado:
+            # avanzamos el cursor hasta este tweet.
+            set_state(
+                cursor,
+                "replies_last_root_id",
+                str(root_tweetid)
+            )
         # ----------------------------------------
         # DECIDIR SI AVANZAMOS AL SIGUIENTE USUARIO
         # ----------------------------------------
 
-        pagination_pending = get_state(cursor,f"replies_pagination_token:{root_tweetid}",None)
-
-        if processing_failed:
-            pass
-        elif pagination_pending:
-            pass
-        else:
-            set_state(cursor,"replies_last_root_id",str(root_tweetid))
 
         conn.commit()
         return jsonify({
