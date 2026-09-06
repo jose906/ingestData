@@ -946,6 +946,12 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
             created_dt = None
 
     author_id = reply.get("author_id")
+    parent_tweetid = None
+
+    for ref in reply.get("referenced_tweets", []):
+        if ref.get("type") == "replied_to":
+            parent_tweetid = ref.get("id")
+            break
 
     sentimiento = None
 
@@ -961,12 +967,13 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
     (
         replyid,
         tweetid,
+        parent_tweetid,
         text,
         created,
         TweetUser_idTweetUser,
         sentimiento
     )
-    VALUES (%s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
 
     ON DUPLICATE KEY UPDATE
         text = VALUES(text),
@@ -978,6 +985,7 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
         (
             reply_id,
             root_tweetid,
+            parent_tweetid,
             text,
             created_dt,
             author_id,
