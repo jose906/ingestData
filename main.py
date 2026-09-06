@@ -220,6 +220,19 @@ def reprocess_pending_tweets(limit=100):
     try:
         conn = get_db_connection()
         cur = conn.cursor(dictionary=True)
+        cur.execute(
+        "SELECT GET_LOCK('netvora_ml_reprocess', 0) AS acquired"
+    )
+
+        lock_result = cur.fetchone()
+
+        if not lock_result or lock_result["acquired"] != 1:
+            return {
+                "ok": True,
+                "busy": True,
+                "procesados": 0,
+                "message": "Ya existe otra ejecución de reprocesamiento ML."
+            }
         cur.execute("""
             SELECT
                 DATABASE() AS database_name,
@@ -322,6 +335,14 @@ def reprocess_pending_tweets(limit=100):
         }
 
     finally:
+
+        if cur and conn:
+            try:
+                cur.execute(
+                    "SELECT RELEASE_LOCK('netvora_ml_reprocess')"
+                )
+            except Exception:
+                pass
 
         if cur:
             try:
@@ -872,6 +893,44 @@ def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
         (hours_back, cap),
     )
     return set(str(r[0]) for r in cursor.fetchall())
+def fetch_recent_root_tweets(
+    cursor,
+    hours_back: int = 48,
+    cap: int = 5000
+):
+    cursor.execute(
+        """
+        SELECT
+            t.tweetid,
+            t.created,
+            t.TweetUser_idTweetUser,
+            tu.TweetUser
+        FROM Tweets t
+        JOIN TweetUser tu
+            ON tu.idTweetUser = t.TweetUser_idTweetUser
+        WHERE t.created >= (
+            UTC_TIMESTAMP() - INTERVAL %s HOUR
+        )
+        ORDER BY t.created ASC, t.tweetid ASC
+        LIMIT %s
+        """,
+        (
+            hours_back,
+            cap
+        )
+    )
+
+    rows = cursor.fetchall()
+
+    return [
+        {
+            "tweetid": str(row[0]),
+            "created": row[1],
+            "tweetuser_id": row[2],
+            "username": row[3]
+        }
+        for row in rows
+    ]
 
 def insert_reply(cursor, root_tweetid: str, reply: dict):
     reply_id = reply["id"]
@@ -879,6 +938,7 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
     created_at = reply.get("created_at")
 
     created_dt = None
+
     if created_at:
         try:
             created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
@@ -887,48 +947,47 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
 
     author_id = reply.get("author_id")
 
+    sentimiento = None
+
+    if text:
+        try:
+            sentimiento = MLModel.get_sentiment(text)[0]
+        except Exception as e:
+            print(f"⚠️ Error sentimiento reply {reply_id}: {e}")
+            sentimiento = None
+
     sql = """
-    INSERT INTO replies (replyid, tweetid, text, created, TweetUser_idTweetUser, sentimiento)
-    VALUES (%s, %s, %s, %s, %s, %s)
-    ON DUPLICATE KEY UPDATE
-      text = VALUES(text),
-      created = VALUES(created)
-    """
-    cursor.execute(sql, (
-        reply_id,
-        root_tweetid,          # guardamos el tweet ORIGINAL (root) en tweetid
+    INSERT INTO replies
+    (
+        replyid,
+        tweetid,
         text,
-        created_dt,
-        author_id,
-        MLModel.get_sentiment(text)[0] if text else None,
-    ))
-'''
-def x_search_replies_to_username(username: str, since_id: str | None, next_token: str | None):
-    url = "https://api.twitter.com/2/tweets/search/recent"
-    
-    params = {
-        "query": f"to:{username} is:reply",
-        "max_results": 100,
-        "tweet.fields": "created_at,author_id,conversation_id",
-    }
-    if since_id:
-        params["since_id"] = since_id
-    if next_token:
-        params["next_token"] = next_token
+        created,
+        TweetUser_idTweetUser,
+        sentimiento
+    )
+    VALUES (%s, %s, %s, %s, %s, %s)
 
-    r = requests.get(url, headers=headers, params=params, timeout=20)
+    ON DUPLICATE KEY UPDATE
+        text = VALUES(text),
+        created = VALUES(created)
+    """
 
-    # Manejo 429: no dormimos infinito (Cloud Run). Cortamos y reanudamos luego.
-    if r.status_code == 429:
-        retry_after = r.headers.get("retry-after")
-        return {"rate_limited": True, "retry_after": retry_after, "status": 429, "body": r.text}
+    cursor.execute(
+        sql,
+        (
+            reply_id,
+            root_tweetid,
+            text,
+            created_dt,
+            author_id,
+            sentimiento
+        )
+    )
 
-    if r.status_code != 200:
-        return {"error": True, "status": r.status_code, "body": r.text}
+    return 1 if cursor.rowcount == 1 else 0
 
-    return r.json()
 
-'''
 def x_search_replies_to_username(username: str, since_id: str | None, next_token: str | None):
     url = "https://api.twitter.com/2/tweets/search/recent"
 
@@ -968,6 +1027,78 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
 
     return r.json()
 
+def x_search_conversation(
+    root_tweetid: str,
+    since_id: str | None,
+    next_token: str | None
+):
+    url = "https://api.twitter.com/2/tweets/search/recent"
+
+    base_params = {
+        "query": f"conversation_id:{root_tweetid} is:reply",
+        "max_results": 100,
+        "tweet.fields": (
+            "created_at,"
+            "author_id,"
+            "conversation_id,"
+            "in_reply_to_user_id,"
+            "referenced_tweets"
+        ),
+    }
+
+    params = dict(base_params)
+
+    if since_id:
+        params["since_id"] = str(since_id)
+
+    if next_token:
+        params["next_token"] = next_token
+
+    try:
+        r = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=20
+        )
+
+    except requests.RequestException as e:
+        return {
+            "error": True,
+            "status": None,
+            "body": str(e)
+        }
+
+    if r.status_code == 429:
+        return {
+            "rate_limited": True,
+            "retry_after": r.headers.get("retry-after"),
+            "status": 429,
+            "body": r.text
+        }
+
+    if r.status_code == 400 and since_id:
+        body_text = r.text or ""
+
+        if (
+            "since_id" in body_text
+            and "must be a tweet id created after" in body_text
+        ):
+            return {
+                "since_id_expired": True,
+                "status": 400,
+                "body": body_text
+            }
+
+    if r.status_code != 200:
+        return {
+            "error": True,
+            "status": r.status_code,
+            "body": r.text
+        }
+
+    return r.json()
+
 @app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     """
@@ -975,67 +1106,102 @@ def ingest_replies_handler():
     y guarda solo los que pertenecen a tweets (root) de las últimas 48h.
     Diseñado para corridas frecuentes (cada 5-10 min) y para no reventar rate limits.
     """
+    conn = None
+    cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        cursor.execute(
+        "SELECT GET_LOCK('netvora_replies_ingest', 0)"
+        )
 
-        # 1) tweets (root) recientes (48h)
-        root_ids = fetch_recent_root_tweetids(cursor, hours_back=48, cap=5000)
-        if not root_ids:
-            return jsonify({"ok": True, "msg": "No hay tweets root en las últimas 48h"}), 200
+        lock_result = cursor.fetchone()
 
-        # 2) Obtener usernames (mejor que user_id para operador to:)
-        #    Si tu TweetUser.TweetUser guarda username, úsalo:
-        cursor.execute("SELECT TweetUser FROM TweetUser WHERE TweetUser IS NOT NULL AND TweetUser<>''")
-        usernames = [r[0] for r in cursor.fetchall()]
+        if not lock_result or lock_result[0] != 1:
+            return jsonify({
+                "ok": True,
+                "busy": True,
+                "message": "Ya existe otra ejecución de ingest_replies en proceso."
+            }), 200
 
-        # 3) procesar pocas cuentas por corrida (anti-timeout)
+        
+        root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
+
+        if not root_tweets:
+            return jsonify({
+                "ok": True,
+                "msg": "No hay tweets root recientes para procesar"
+            }), 200
+
+
+        # 3) Procesar pocos tweets por ejecución
         batch_size = 1
-        start_idx = int(get_state(cursor, "replies_user_idx", "0") or "0")
-      
-            
+
+        start_idx = int(
+            get_state(cursor,"replies_root_idx","0") or "0")
+
 
         selected = []
-        for i in range(batch_size):
-            if not usernames:
-                break
-            selected.append(usernames[(start_idx + i) % len(usernames)])
 
-        # guardo próximo inicio (round-robin)
-        next_start = (start_idx + len(selected)) % max(len(usernames), 1)
-        set_state(cursor, "replies_user_idx", str(next_start))
+        for i in range(batch_size):
+
+            selected.append(root_tweets[(start_idx + i) % len(root_tweets)])
+
+            
 
         saved = 0
         rate_limited = False
         details = []
 
-        for uname in selected:
-            since_key = f"replies_since_id:{uname}"
-            since_id = get_state(cursor, since_key, None)
+        for root in selected:
 
-            next_token = None
+            root_tweetid = str(root["tweetid"])
+            uname = root["username"]
+
+            # Cada conversación mantiene su propio estado
+            since_key = f"replies_since_id:{root_tweetid}"
+            pagination_key = f"replies_pagination_token:{root_tweetid}"
+            max_seen_key = f"replies_max_seen:{root_tweetid}"
+
+            since_id = get_state(cursor,since_key,None)
+
+            next_token = get_state(cursor,pagination_key,None)
+
+            max_seen_global = get_state(cursor,max_seen_key,None)
+            processing_failed = False
+            
             for page in range(2):
-                data = x_search_replies_to_username(uname, since_id, next_token)
+                data = x_search_conversation(root_tweetid,since_id,next_token)
 
                 if isinstance(data, dict) and data.get("since_id_expired"):
                     print(f"⚠️ since_id expirado para {uname}: {since_id}")
-                    set_state(cursor, since_key, None)
+
+                    set_state(cursor, since_key, "")
+                    set_state(cursor, pagination_key, "")
+                    set_state(cursor, max_seen_key, "")
+
                     since_id = None
                     next_token = None
-                    data = x_search_replies_to_username(uname, None, None)
+                    max_seen_global = None
+
+                    data = x_search_conversation(root_tweetid,None,None)
 
                 if isinstance(data, dict) and data.get("rate_limited"):
                     rate_limited = True
+                    processing_failed = True
                     details.append({
                         "user": uname,
+                        "root_tweetid": root_tweetid,
                         "rate_limited": True,
                         "retry_after": data.get("retry_after")
                     })
                     break
 
                 if isinstance(data, dict) and data.get("error"):
+                    processing_failed = True
                     details.append({
                         "user": uname,
+                        "root_tweetid": root_tweetid,
                         "error": True,
                         "status": data.get("status"),
                         "body": data.get("body")
@@ -1043,35 +1209,117 @@ def ingest_replies_handler():
                     break
 
                 tweets = data.get("data", []) if isinstance(data, dict) else []
+                meta = data.get("meta", {}) if isinstance(data, dict) else {}
+
+                response_next_token = meta.get("next_token")
+
                 if not tweets:
+
+                    # Si X todavía entrega otra página, guardamos ese token.
+                    if response_next_token:
+
+                        set_state( cursor,pagination_key,response_next_token)
+
+                        next_token = response_next_token
+
+                    else:
+                        if max_seen_global not in (None, ""):
+                            set_state(cursor,since_key,str(max_seen_global))
+
+                        set_state(cursor,pagination_key,"")
+                        set_state(cursor,max_seen_key,"")
+                        next_token = None
+
                     break
 
-                max_seen = since_id
                 for tw in tweets:
                     conv_id = str(tw.get("conversation_id") or "")
-                    if conv_id and conv_id in root_ids:
-                        insert_reply(cursor, conv_id, tw)
-                        saved += 1
+
+                    if conv_id == root_tweetid:
+
+                        nuevo = insert_reply(cursor,root_tweetid,tw)
+                        saved += nuevo
 
                     tid = str(tw["id"])
-                    if max_seen in (None, ""):
-                        max_seen = tid
-                    elif int(tid) > int(max_seen):
-                        max_seen = tid
 
-                if max_seen not in (None, ""):
-                    set_state(cursor, since_key, str(max_seen))
+                    if max_seen_global in (None, ""):
+                        max_seen_global = tid
+                    elif int(tid) > int(max_seen_global):
+                        max_seen_global = tid
+
+
+                # Guardamos el mayor tweet ID encontrado hasta ahora
+                if max_seen_global not in (None, ""):
+                    set_state(cursor,max_seen_key,str(max_seen_global))
+
 
                 meta = data.get("meta", {})
                 next_token = meta.get("next_token")
-                if not next_token:
-                    break
+
+
+                # ----------------------------------------
+                # TODAVÍA QUEDAN MÁS PÁGINAS
+                # ----------------------------------------
+                if next_token:
+                    set_state(cursor,pagination_key,next_token)
+
+                    continue
+
+
+                # ----------------------------------------
+                # YA TERMINAMOS TODAS LAS PÁGINAS
+                # ----------------------------------------
+
+                if max_seen_global not in (None, ""):
+                    set_state(cursor,since_key,str(max_seen_global))
+
+                # Limpiamos estados temporales
+                set_state(cursor, pagination_key, "")
+                set_state(cursor, max_seen_key, "")
+
+                break
+        # ----------------------------------------
+        # DECIDIR SI AVANZAMOS AL SIGUIENTE USUARIO
+        # ----------------------------------------
+
+        pagination_pending = get_state(
+            cursor,
+            f"replies_pagination_token:{root_tweetid}",
+            None
+        )
+
+        if processing_failed:
+
+            # Hubo error o rate limit.
+            # No avanzamos para poder reintentar este mismo root.
+            set_state(
+                cursor,
+                "replies_root_idx",
+                str(start_idx)
+            )
+
+        elif pagination_pending:
+
+            # Todavía quedan páginas de esta conversación.
+            # Seguimos en el mismo tweet raíz.
+            set_state(cursor,"replies_root_idx",str(start_idx))
+
+        else:
+
+            # La conversación terminó correctamente.
+            # Avanzamos al siguiente tweet raíz.
+            next_start = (start_idx + 1) % max(len(root_tweets), 1)
+
+            set_state(cursor,"replies_root_idx",str(next_start))
 
         conn.commit()
         return jsonify({
             "ok": True,
             "saved": saved,
-            "users_processed": selected,
+            "roots_processed": [
+                str(root["tweetid"])
+                for root in selected
+            ],
             "rate_limited": rate_limited,
             "details": details
         }), 200
@@ -1081,6 +1329,13 @@ def ingest_replies_handler():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
+        if cursor and conn:
+            try:
+                cursor.execute(
+                    "SELECT RELEASE_LOCK('netvora_replies_ingest')"
+                )
+            except Exception:
+                pass
         try:
             cursor.close()
             conn.close()
