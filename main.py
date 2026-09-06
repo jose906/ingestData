@@ -1137,6 +1137,7 @@ def ingest_replies_handler():
         root_tweets = fetch_recent_root_tweets(cursor,hours_back=72,cap=5000)
 
         if not root_tweets:
+            
             return jsonify({
                 "ok": True,
                 "msg": "No hay tweets root recientes para procesar"
@@ -1242,6 +1243,11 @@ def ingest_replies_handler():
                     break
 
                 for tw in tweets:
+                    print(
+                        "DEBUG_REPLY:",
+                        tw.get("id"),
+                        tw.get("referenced_tweets")
+                    )
                     conv_id = str(tw.get("conversation_id") or "")
 
                     if conv_id == root_tweetid:
