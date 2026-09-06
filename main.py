@@ -976,8 +976,9 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
     VALUES (%s, %s, %s, %s, %s, %s, %s)
 
     ON DUPLICATE KEY UPDATE
-        text = VALUES(text),
-        created = VALUES(created)
+    text = VALUES(text),
+    created = VALUES(created),
+    parent_tweetid = VALUES(parent_tweetid)
     """
 
     cursor.execute(
