@@ -1147,16 +1147,23 @@ def ingest_replies_handler():
         # 3) Procesar pocos tweets por ejecución
         batch_size = 1
 
-        start_idx = int(
-            get_state(cursor,"replies_root_idx","0") or "0")
-
+        last_root_id = get_state(cursor,"replies_last_root_id",None)
 
         selected = []
 
-        for i in range(batch_size):
+        if last_root_id:
+            next_index = 0
 
-            selected.append(root_tweets[(start_idx + i) % len(root_tweets)])
+            for i, root in enumerate(root_tweets):
+                if int(root["tweetid"]) > int(last_root_id):
+                    next_index = i
+                    break
+            else:
+                next_index = 0
+        else:
+            next_index = 0
 
+        selected.append(root_tweets[next_index])
             
 
         saved = 0
@@ -1297,35 +1304,14 @@ def ingest_replies_handler():
         # DECIDIR SI AVANZAMOS AL SIGUIENTE USUARIO
         # ----------------------------------------
 
-        pagination_pending = get_state(
-            cursor,
-            f"replies_pagination_token:{root_tweetid}",
-            None
-        )
+        pagination_pending = get_state(cursor,f"replies_pagination_token:{root_tweetid}",None)
 
         if processing_failed:
-
-            # Hubo error o rate limit.
-            # No avanzamos para poder reintentar este mismo root.
-            set_state(
-                cursor,
-                "replies_root_idx",
-                str(start_idx)
-            )
-
+            pass
         elif pagination_pending:
-
-            # Todavía quedan páginas de esta conversación.
-            # Seguimos en el mismo tweet raíz.
-            set_state(cursor,"replies_root_idx",str(start_idx))
-
+            pass
         else:
-
-            # La conversación terminó correctamente.
-            # Avanzamos al siguiente tweet raíz.
-            next_start = (start_idx + 1) % max(len(root_tweets), 1)
-
-            set_state(cursor,"replies_root_idx",str(next_start))
+            set_state(cursor,"replies_last_root_id",str(root_tweetid))
 
         conn.commit()
         return jsonify({
