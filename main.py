@@ -1103,6 +1103,7 @@ def ingest_replies_handler():
     Diseñado para corridas frecuentes (cada 5-10 min) y para no reventar rate limits.
     """
     start_time = time.time()
+    MAX_RUNTIME_SECONDS = 40
     conn = None
     cursor = None
     try:
@@ -1226,6 +1227,12 @@ def ingest_replies_handler():
         pages_fetched = 0
 
         for root in selected:
+            if time.time() - start_time >= MAX_RUNTIME_SECONDS:
+                details.append({
+                    "type": "runtime_limit",
+                    "message": "Se alcanzó el límite interno de tiempo."
+                })
+                break
 
             root_tweetid = str(root["tweetid"])
             uname = root["username"]
