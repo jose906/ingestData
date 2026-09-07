@@ -1137,6 +1137,32 @@ def ingest_replies_handler():
 
         if pending_row:
             pending_root_id = pending_row[0].split(":")[-1]
+            
+        # Si el root pendiente ya salió de la ventana de 48 horas,
+        # limpiamos su estado para no intentar retomarlo eternamente.
+        if pending_root_id:
+
+            root_exists = any(
+                str(root["tweetid"]) == str(pending_root_id)
+                for root in root_tweets
+            )
+
+            if not root_exists:
+
+                set_state(
+                    cursor,
+                    f"replies_pagination_token:{pending_root_id}",
+                    ""
+                )
+
+                set_state(
+                    cursor,
+                    f"replies_max_seen:{pending_root_id}",
+                    ""
+                )
+
+                pending_root_id = None
+            
         
         
 
