@@ -1177,7 +1177,7 @@ def ingest_replies_handler():
 
 
         # 3) Procesar pocos tweets por ejecución
-        batch_size = 5
+        batch_size = 10
 
         last_root_id = get_state(cursor,"replies_last_root_id",None)
 
