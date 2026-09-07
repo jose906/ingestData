@@ -1122,6 +1122,23 @@ def ingest_replies_handler():
 
         
         root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
+        cursor.execute("""
+            SELECT k
+            FROM ingest_state
+            WHERE k LIKE 'replies_pagination_token:%'
+            AND v IS NOT NULL
+            AND v <> ''
+            LIMIT 1
+        """)
+
+        pending_row = cursor.fetchone()
+
+        pending_root_id = None
+
+        if pending_row:
+            pending_root_id = pending_row[0].split(":")[-1]
+        
+        
 
         if not root_tweets:
             
@@ -1138,26 +1155,41 @@ def ingest_replies_handler():
 
         selected = []
 
-        if last_root_id:
-            next_index = 0
+        # 1) Si hay una conversación con paginación pendiente,
+        # la procesamos primero y sola.
+        if pending_root_id:
 
-            for i, root in enumerate(root_tweets):
-                if int(root["tweetid"]) > int(last_root_id):
-                    next_index = i
-                    break
+            pending_root = next((root for root in root_tweets if str(root["tweetid"]) == str(pending_root_id)),None)
+
+            if pending_root:
+                selected.append(pending_root)
+
+        # 2) Si no hay paginación pendiente,
+        # seleccionamos varios roots consecutivos.
+        if not selected:
+
+            if last_root_id:
+                next_index = 0
+
+                for i, root in enumerate(root_tweets):
+                    if int(root["tweetid"]) > int(last_root_id):
+                        next_index = i
+                        break
+                else:
+                    next_index = 0
+
             else:
                 next_index = 0
-        else:
-            next_index = 0
 
-        for i in range(batch_size):
-            idx = next_index + i
+            for i in range(batch_size):
+                idx = next_index + i
 
-            if idx >= len(root_tweets):
-                break
+                if idx >= len(root_tweets):
+                    break
 
-            selected.append(root_tweets[idx])
-            
+                selected.append(
+                    root_tweets[idx]
+                )
 
         saved = 0
         rate_limited = False
