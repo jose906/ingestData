@@ -1102,6 +1102,7 @@ def ingest_replies_handler():
     y guarda solo los que pertenecen a tweets (root) de las últimas 48h.
     Diseñado para corridas frecuentes (cada 5-10 min) y para no reventar rate limits.
     """
+    start_time = time.time()
     conn = None
     cursor = None
     try:
@@ -1221,6 +1222,8 @@ def ingest_replies_handler():
         rate_limited = False
         details = []
         completed_roots = []
+        fetched_replies = 0
+        pages_fetched = 0
 
         for root in selected:
 
@@ -1279,6 +1282,8 @@ def ingest_replies_handler():
 
                 tweets = data.get("data", []) if isinstance(data, dict) else []
                 meta = data.get("meta", {}) if isinstance(data, dict) else {}
+                pages_fetched += 1
+                fetched_replies += len(tweets)
 
                 response_next_token = meta.get("next_token")
 
@@ -1302,11 +1307,6 @@ def ingest_replies_handler():
                     break
 
                 for tw in tweets:
-                    print(
-                        "DEBUG_REPLY:",
-                        tw.get("id"),
-                        tw.get("referenced_tweets")
-                    )
                     conv_id = str(tw.get("conversation_id") or "")
 
                     if conv_id == root_tweetid:
@@ -1379,7 +1379,10 @@ def ingest_replies_handler():
             "saved": saved,
             "roots_processed": completed_roots,
             "rate_limited": rate_limited,
-            "details": details
+            "details": details,
+            "fetched_replies": fetched_replies,
+            "pages_fetched": pages_fetched,
+            "elapsed_seconds": round(time.time() - start_time, 2),
         }), 200
 
     except Error as e:
