@@ -1125,6 +1125,18 @@ def ingest_replies_handler():
         
         root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
         cursor.execute("""
+            DELETE s
+            FROM ingest_state s
+            LEFT JOIN Tweets t
+                ON t.tweetid = CAST(
+                    SUBSTRING_INDEX(s.k, ':', -1)
+                    AS UNSIGNED
+                )
+                AND t.created >= UTC_TIMESTAMP() - INTERVAL 48 HOUR
+            WHERE s.k LIKE 'replies_%:%'
+            AND t.tweetid IS NULL
+        """)
+        cursor.execute("""
             SELECT k
             FROM ingest_state
             WHERE k LIKE 'replies_pagination_token:%'
