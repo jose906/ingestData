@@ -1220,6 +1220,7 @@ def ingest_replies_handler():
         saved = 0
         rate_limited = False
         details = []
+        completed_roots = []
 
         for root in selected:
 
@@ -1367,24 +1368,16 @@ def ingest_replies_handler():
 
             # Root completamente terminado:
             # avanzamos el cursor hasta este tweet.
-            set_state(
-                cursor,
-                "replies_last_root_id",
-                str(root_tweetid)
-            )
-        # ----------------------------------------
-        # DECIDIR SI AVANZAMOS AL SIGUIENTE USUARIO
-        # ----------------------------------------
+            set_state(cursor,"replies_last_root_id",str(root_tweetid))
+            completed_roots.append(root_tweetid)
+        
 
 
         conn.commit()
         return jsonify({
             "ok": True,
             "saved": saved,
-            "roots_processed": [
-                str(root["tweetid"])
-                for root in selected
-            ],
+            "roots_processed": completed_roots,
             "rate_limited": rate_limited,
             "details": details
         }), 200
