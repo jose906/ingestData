@@ -16,7 +16,7 @@ DB_CONFIG = {
     "port": "3306",
 }
 
-
+  
 
 
 def get_db_connection():
