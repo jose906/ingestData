@@ -8,7 +8,7 @@ gunicorn
 pandas
 google-genai
 python-dateutil
-sentence_transformers
+
 
 
 
