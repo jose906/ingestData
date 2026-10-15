@@ -1,11 +1,11 @@
 # 1. Cargar modelo
-from sentence_transformers import SentenceTransformer
+
 import re ,os,json
 import mysql.connector 
 
 
 model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-model = SentenceTransformer(model_name)
+
 DB_CONFIG = {
             # IP pública o nombre interno de Cloud SQL
     "user": os.environ.get("DB_USER"),
@@ -46,17 +46,27 @@ def limpiar_tweet(texto):
 
 
 def get_tweets():
-    sql = """SELECT t.tweetid, t.text
+    sql = """
+        SELECT t.tweetid, t.text
         FROM Tweets t
         LEFT JOIN tweet_embeddings e
             ON t.tweetid = e.tweetid
         WHERE e.tweetid IS NULL
+        ORDER BY t.tweetid
         LIMIT 50
-         """
+    """
+
     conn = get_db_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(sql)
-    return cur.fetchall()
+
+    try:
+        cur = conn.cursor(dictionary=True)
+        try:
+            cur.execute(sql)
+            return cur.fetchall()
+        finally:
+            cur.close()
+    finally:
+        conn.close()
 
 def data_to_insert(embeddings,texts,tweet_ids):
     data = []
@@ -75,7 +85,12 @@ def data_to_insert(embeddings,texts,tweet_ids):
 
 
 
+
 def insert_embeddings():
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(model_name)
+    
+    
     tweets = get_tweets()
     tweet_ids = []
     texts_texts = []

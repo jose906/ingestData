@@ -1,0 +1,2 @@
+sentence-transformers
+mysql-connector-python

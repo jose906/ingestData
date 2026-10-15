@@ -1,0 +1,16 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build embeddings'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.embeddings'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/tweets-455721/cloud-run-source-deploy/netvora-embeddings:$COMMIT_SHA'
+      - '.'
+
+images:
+  - 'europe-west1-docker.pkg.dev/tweets-455721/cloud-run-source-deploy/netvora-embeddings:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
