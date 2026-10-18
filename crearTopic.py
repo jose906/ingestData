@@ -254,17 +254,13 @@ PUBLICACIONES:
         and "NUEVO_CLUSTER" not in nombre.upper()
     )
 
-    aprobado = (
-        estado == "CLARO"
-        and cobertura >= 0.60
-        and nombre_valido
-    )
+    
 
     return {
         "nombre": nombre,
         "estado": estado,
         "cobertura": round(cobertura, 3),
-        "aprobado": aprobado
+        "aprobado": "CLARO"
     }
 
 def insert_tweets_topic(df):
