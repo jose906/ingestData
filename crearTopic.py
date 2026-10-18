@@ -264,34 +264,108 @@ PUBLICACIONES:
         "nombre": nombre,
         "estado": estado,
         "cobertura": round(cobertura, 3),
-        "aprobado": True
+        "aprobado": aprobado
     }
 
-def insert_tweets_topic(df):
-    sql = """
-    UPDATE topics
-    SET topic_name = %s
-    WHERE topic_id = %s
-    """
+def procesar_resultados_topics(df):
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    data = list(
-        zip(
-            df["topic_name_generado"],
-            df["topic_id"].astype(int)
-        )
-    )
+    actualizados = 0
+    eliminados = 0
 
-    cursor.executemany(sql, data)
+    try:
+        conn.start_transaction()
 
-    conn.commit()
+        for _, row in df.iterrows():
 
-    cursor.close()
-    conn.close()
+            topic_id = int(row["topic_id"])
+            aprobado = bool(row["aprobado"])
 
-    print(f"{len(data)} nombres actualizados.")
+            # Bloquear y verificar que el tópico siga pendiente
+            cursor.execute("""
+                SELECT topic_name
+                FROM topics
+                WHERE topic_id = %s
+                FOR UPDATE
+            """, (topic_id,))
+
+            topic = cursor.fetchone()
+
+            if not topic:
+                continue
+
+            if "NUEVO_CLUSTER" not in (topic[0] or "").upper():
+                continue
+
+            if aprobado:
+
+                cursor.execute("""
+                    UPDATE topics
+                    SET topic_name = %s
+                    WHERE topic_id = %s
+                """, (
+                    row["topic_name_generado"],
+                    topic_id
+                ))
+
+                actualizados += cursor.rowcount
+
+                print(
+                    f"Topic {topic_id}: "
+                    f"actualizado correctamente."
+                )
+
+            else:
+
+                # 1. Eliminar relaciones con tweets
+                cursor.execute("""
+                    DELETE FROM topic_tweets
+                    WHERE topic_id = %s
+                """, (topic_id,))
+
+                # 2. Eliminar embedding del tópico
+                cursor.execute("""
+                    DELETE FROM topic_embeddings
+                    WHERE topic_id = %s
+                """, (topic_id,))
+
+                # 3. Eliminar tópico
+                cursor.execute("""
+                    DELETE FROM topics
+                    WHERE topic_id = %s
+                """, (topic_id,))
+
+                eliminados += cursor.rowcount
+
+                print(
+                    f"Topic {topic_id}: ELIMINADO "
+                    f"por falta de coherencia. "
+                    f"Cobertura: {row['cobertura']:.0%}"
+                )
+
+        conn.commit()
+
+        print("\nCAMBIOS CONFIRMADOS")
+        print("Actualizados:", actualizados)
+        print("Eliminados:", eliminados)
+
+        return {
+            "actualizados": actualizados,
+            "eliminados": eliminados
+        }
+
+    except Exception:
+
+        conn.rollback()
+        traceback.print_exc()
+        raise
+
+    finally:
+
+        cursor.close()
+        conn.close()
 
 
 def insertar_nuevos_topicos(
@@ -391,11 +465,16 @@ def insertar_nuevos_topicos(
         len(df_resultados) - len(df_aprobados)
     )
 
-    if aplicar_cambios and not df_aprobados.empty:
-        insert_tweets_topic(df_aprobados)
+    if aplicar_cambios:
+
+        procesar_resultados_topics(df_resultados)
+
     else:
+
         print("Modo revisión: sin cambios en MySQL.")
 
     return df_resultados
+
+   
  
     
