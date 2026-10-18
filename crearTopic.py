@@ -5,6 +5,7 @@ import pandas as pd
 from google import genai
 import json
 from google.genai import types
+import traceback
 
 
 
@@ -367,8 +368,12 @@ def insertar_nuevos_topicos(
             )
 
         except Exception as e:
-            print(f"Error en topic {topic_id}: {e}")
+            
+            traceback.print_exc()
 
+            raise RuntimeError(
+                f"Error procesando topic {topic_id}: {e}"
+            ) from e
     if not resultados:
         return None
 
