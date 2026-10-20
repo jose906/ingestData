@@ -79,10 +79,15 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
 
     if created_at:
         try:
-            created_dt = datetime.fromisoformat(
-                created_at.replace("Z", "+00:00")
+            created_dt = (
+                datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                )
+                .astimezone(BOLIVIA_TZ)
+                .replace(tzinfo=None)
             )
-        except Exception:
+        except Exception as e:
+            print(f"Error convirtiendo fecha tweet {tweet_id}: {e}")
             created_dt = None
 
     url = f"https://twitter.com/i/web/status/{tweet_id}"
