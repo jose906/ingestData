@@ -2,9 +2,10 @@ import os
 import mysql.connector
 import json
 import requests
-import json
+import argparse
+import logging
+import sys
 
-from main import ejecutar_job_stance
 
 # Comparte la configuración de Cloud SQL con main.py.
 # No almacenes credenciales ni IP públicas en el código fuente.
@@ -31,7 +32,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 
 #client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL = "gemini-3.8-flash"
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 
 def get_db_connection():
@@ -345,7 +346,7 @@ def llamar_gemini(prompt, thinking_budget=0):
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-3.8-flash:generateContent"
+        f"models/{MODEL}:generateContent"
     )
 
     headers = {
@@ -365,11 +366,13 @@ def llamar_gemini(prompt, thinking_budget=0):
         ],
             
         "generationConfig": {
-            "temperature": 0.0,
             "responseMimeType": "application/json",
-            "thinkingConfig": {
-                "thinkingBudget": thinking_budget
-            }
+            # Gemini 3.x usa thinkingLevel; thinkingBudget corresponde a Gemini 2.5.
+            "thinkingConfig": (
+                {"thinkingLevel": "low" if thinking_budget == 0 else "medium"}
+                if not MODEL.startswith("gemini-2.5")
+                else {"thinkingBudget": thinking_budget}
+            )
         }
 
     }
@@ -1174,7 +1177,7 @@ def guardar_post_target(tweetid, resultado):
             main_target,
             description,
             confidence,
-            "gemini-2.5-flash",
+            MODEL,
             "v1"
         ))
 
@@ -1427,7 +1430,7 @@ def guardar_stance_target(post_target_id, resultados):
             post_target_id,
             stance,
             confidence,
-            "gemini-2.5-flash",
+            MODEL,
             "v1"
         ))
 
@@ -2066,16 +2069,127 @@ def ejecutar_stance_por_topico(
 
 
 
-    
-    
+# =========================================================
+# CLOUD RUN JOB: ejecución independiente, sin Flask ni main.py
+# =========================================================
+
+logger = logging.getLogger("netvora.stance")
+
+
+def ejecutar_job_stance(lock_name, tarea):
+    """Ejecuta una fase con bloqueo MySQL, devolviendo su resultado Python."""
+    conn = None
+    cur = None
+    adquirido = False
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT GET_LOCK(%s, 0)", (lock_name,))
+        fila = cur.fetchone()  # Consumir el resultado ANTES de otra consulta.
+        adquirido = fila is not None and fila[0] == 1
+        if not adquirido:
+            raise RuntimeError(f"La fase '{lock_name}' ya está en ejecución")
+
+        logger.info("Iniciando fase: %s", lock_name)
+        resultado = tarea()
+        logger.info("Fase terminada: %s; resultado=%s", lock_name,
+                    json.dumps(resultado, ensure_ascii=False, default=str))
+        return resultado
+    finally:
+        if cur is not None:
+            if adquirido:
+                try:
+                    cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+                    cur.fetchone()
+                except Exception:
+                    logger.exception("No se pudo liberar el lock %s", lock_name)
+            try:
+                cur.close()
+            except Exception:
+                logger.exception("No se pudo cerrar cursor de %s", lock_name)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                logger.exception("No se pudo cerrar conexión de %s", lock_name)
+
+
+def ejecutar_stance_job(modo="all"):
+    """Procesa pendientes de cualquier fecha en tandas de tamaño limitado."""
+    resultados = {}
+
+    if modo in ("all", "posts"):
+        resultados["posts"] = ejecutar_job_stance(
+            "netvora_stance_posts",
+            lambda: ejecutar_stance_por_target(
+                max_comentarios=50,
+                tamano_lote=10,
+                max_publicaciones=10,
+                desde=None,
+            ),
+        )
+
+    if modo in ("all", "topics"):
+        def procesar_topicos():
+            targets = ejecutar_targets_topicos(
+                limit=4,
+                tweets_por_topico=50,
+                desde=None,
+            )
+            comentarios = ejecutar_stance_por_topico(
+                max_comentarios=50,
+                tamano_lote=10,
+                max_topicos=5,
+                max_publicaciones=10,
+                desde=None,
+            )
+            return {"targets": targets, "comentarios": comentarios}
+
+        resultados["topics"] = ejecutar_job_stance(
+            "netvora_stance_topics", procesar_topicos
+        )
+
+    return resultados
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Procesar Stance en Cloud Run Jobs (todos los datos, por lotes)."
+    )
+    parser.add_argument("--modo", choices=("all", "posts", "topics"), default="all")
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+    try:
+        # Validar la configuración antes de iniciar llamadas a Gemini.
+        if not GEMINI_API_KEY:
+            raise RuntimeError("Falta la variable de entorno GEMINI_API_KEY")
+        resultados = ejecutar_stance_job(args.modo)
+        resumen = {"ok": True, "modo": args.modo, "resultados": resultados}
+        print(json.dumps(resumen, ensure_ascii=False, default=str), flush=True)
+
+        # Fallos por lote se capturan internamente en las funciones de Stance.
+        # Si ocurrieron, no marcar la tarea como exitosa sin avisar.
+        fallidos = 0
+        if "posts" in resultados:
+            fallidos += int(resultados["posts"].get("fallidos", 0))
+        if "topics" in resultados:
+            fallidos += int(resultados["topics"]["targets"].get("fallidos", 0))
+            fallidos += int(resultados["topics"]["comentarios"].get("fallidos", 0))
+        if fallidos:
+            logger.error("Se registraron %d elementos fallidos. Ver logs anteriores.", fallidos)
+            return 1
+        return 0
+
+    except Exception:
+        logger.exception("Error fatal ejecutando Stance Job")
+        return 1
+
+
 if __name__ == "__main__":
-    
-    # Procesa pendientes entre todas las publicaciones almacenadas,
-    # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
-    ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=50,tamano_lote=50,max_publicaciones=10))
-    
-    targets = ejecutar_targets_topicos(limit=4,tweets_por_topico=50)
-
-    comentarios = ejecutar_stance_por_topico(max_comentarios=50, tamano_lote=50, max_topicos=5, max_publicaciones=10)
-
-     
+    sys.exit(main())
