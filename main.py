@@ -14,6 +14,11 @@ import hashlib
 import base64
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
+from stance import (
+    ejecutar_stance_por_target,
+    ejecutar_targets_topicos,
+    ejecutar_stance_por_topico
+)
 
 
 
@@ -891,7 +896,7 @@ def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
         """
         SELECT tweetid
         FROM Tweets
-        WHERE created >= (UTC_TIMESTAMP() - INTERVAL %s HOUR)
+        WHERE created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL %s HOUR
         ORDER BY created DESC
         LIMIT %s
         """,
@@ -909,9 +914,7 @@ def fetch_recent_root_tweets(cursor,hours_back: int = 48,cap: int = 5000):
         FROM Tweets t
         JOIN TweetUser tu
             ON tu.idTweetUser = t.TweetUser_idTweetUser
-        WHERE t.created >= (
-            UTC_TIMESTAMP() - INTERVAL %s HOUR
-        )
+        WHERE t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL %s HOUR
         ORDER BY t.created ASC, t.tweetid ASC
         LIMIT %s
         """,
@@ -942,7 +945,11 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
 
     if created_at:
         try:
-            created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            created_dt = created_dt = (
+    datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    .astimezone(BOLIVIA_TZ)
+    .replace(tzinfo=None)
+)
         except Exception:
             created_dt = None
 
@@ -1137,7 +1144,7 @@ def ingest_replies_handler():
                     SUBSTRING_INDEX(s.k, ':', -1)
                     AS UNSIGNED
                 )
-                AND t.created >= UTC_TIMESTAMP() - INTERVAL 48 HOUR
+                AND t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL 48 HOUR
             WHERE s.k LIKE 'replies_%:%'
             AND t.tweetid IS NULL
         """)
@@ -1446,6 +1453,126 @@ def webhook():
     if request.method == "POST":
         print(request.json)  # aquí llegan los eventos
         return "OK", 200
+    
+    
+
+def verificar_stance_job():
+    esperado = os.environ.get("STANCE_JOB_TOKEN", "")
+    recibido = request.headers.get("X-Stance-Token", "")
+
+    return bool(esperado) and hmac.compare_digest(
+        esperado, recibido
+    )
+
+
+def ejecutar_job_stance(lock_name, tarea):
+    conn = None
+    cur = None
+    adquirido = False
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT GET_LOCK(%s, 0)",
+            (lock_name,)
+        )
+
+        adquirido = cur.fetchone()[0] == 1
+
+        if not adquirido:
+            return jsonify({
+                "ok": True,
+                "busy": True
+            }), 200
+
+        resultado = tarea()
+
+        return jsonify({
+            "ok": True,
+            "resultado": resultado
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+    finally:
+        if cur is not None:
+            if adquirido:
+                try:
+                    cur.execute(
+                        "SELECT RELEASE_LOCK(%s)",
+                        (lock_name,)
+                    )
+                except Exception:
+                    pass
+
+            cur.close()
+
+        if conn is not None:
+            conn.close()
+
+
+@app.route("/stance/posts", methods=["POST"])
+def ejecutar_stance_posts_handler():
+    if not verificar_stance_job():
+        return jsonify({"error": "No autorizado"}), 403
+
+    desde = os.environ.get("STANCE_DESDE")
+
+    if not desde:
+        return jsonify({"error": "Falta STANCE_DESDE"}), 503
+
+    return ejecutar_job_stance(
+        "netvora_stance_posts",
+        lambda: ejecutar_stance_por_target(
+            max_comentarios=10,
+            tamano_lote=10,
+            max_publicaciones=3,
+            desde=desde
+        )
+    )
+
+
+@app.route("/stance/topics", methods=["POST"])
+def ejecutar_stance_topics_handler():
+    if not verificar_stance_job():
+        return jsonify({"error": "No autorizado"}), 403
+
+    desde = os.environ.get("STANCE_DESDE")
+
+    if not desde:
+        return jsonify({"error": "Falta STANCE_DESDE"}), 503
+
+    def tarea():
+        targets = ejecutar_targets_topicos(
+            limit=2,
+            tweets_por_topico=20,
+            desde=desde
+        )
+
+        comentarios = ejecutar_stance_por_topico(
+            desde=desde,
+            max_comentarios=10,
+            tamano_lote=10,
+            max_topicos=2,
+            max_publicaciones=3
+        )
+
+        return {
+            "targets": targets,
+            "comentarios": comentarios
+        }
+
+    return ejecutar_job_stance(
+        "netvora_stance_topics",
+        tarea
+    )
+
 
 
 @app.route("/selectTopics", methods=["GET"])

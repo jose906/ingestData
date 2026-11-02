@@ -12,10 +12,12 @@ DB_CONFIG = {
     "port": 3306,
 }
 
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+
 #client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 
 
 def get_db_connection():
@@ -329,7 +331,7 @@ def llamar_gemini(prompt, thinking_budget=0):
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-2.5-flash:generateContent"
+        "models/gemini-3.8-flash:generateContent"
     )
 
     headers = {
@@ -679,7 +681,10 @@ def comparar_stance_modelos(limit=50):
 
 
 
-def get_topics_pending(limit=10):
+def get_topics_pending(limit=10, desde=None):
+    """
+    Obtiene los temas pendientes de procesamiento.
+    """
     connection = get_db_connection()
 
     query = """
@@ -689,12 +694,13 @@ def get_topics_pending(limit=10):
         FROM topics
         WHERE target_type IS NULL
           AND active = 1
+          AND (%s IS NULL OR created_at >= %s)
         ORDER BY total_tweets DESC
         LIMIT %s
     """
 
     cursor = connection.cursor(dictionary=True)
-    cursor.execute(query, (limit,))
+    cursor.execute(query, (desde, desde, limit))
     resultados = cursor.fetchall()
 
     cursor.close()
@@ -1450,7 +1456,7 @@ def guardar_stance_target(post_target_id, resultados):
 
 
 
-def get_siguiente_publicacion_target(last_tweetid=0):
+def get_siguiente_publicacion_target(last_tweetid=0, desde=None):
 
     connection = get_db_connection()
     cursor = None
@@ -1466,6 +1472,8 @@ def get_siguiente_publicacion_target(last_tweetid=0):
             LEFT JOIN post_targets pt
                 ON pt.tweetid = t.tweetid
             WHERE t.tweetid > %s
+            AND (%s IS NULL OR t.created >= %s)
+            
               AND (
                   (
                       pt.id IS NULL
@@ -1493,7 +1501,7 @@ def get_siguiente_publicacion_target(last_tweetid=0):
               )
             ORDER BY t.tweetid ASC
             LIMIT 1
-        """, (last_tweetid,))
+        """,(last_tweetid, desde, desde))
 
         return cursor.fetchone()
 
@@ -1552,7 +1560,8 @@ def get_comentarios_target_pendientes(
 def ejecutar_stance_por_target(
     max_comentarios=500,
     tamano_lote=20,
-    max_publicaciones=200
+    max_publicaciones=200,
+    desde=None
 ):
     """
     Procesa comentarios utilizando el target
@@ -1570,9 +1579,9 @@ def ejecutar_stance_por_target(
 
     while (intentados < max_comentarios and publicaciones < max_publicaciones):
 
-        publicacion = get_siguiente_publicacion_target(
-            ultimo_tweetid
-        )
+        publicacion = get_siguiente_publicacion_target(ultimo_tweetid,
+    desde=desde
+)
 
         if not publicacion:
             break
@@ -1674,19 +1683,440 @@ def ejecutar_stance_por_target(
         "fallidos": fallidos,
         "publicaciones": publicaciones
     }
-    
-    
-    
-    
-if __name__ == "__main__":
-    resumen = ejecutar_stance_por_target(
-        max_comentarios=500,
-        tamano_lote=20,
-        max_publicaciones=200
+
+
+def ejecutar_targets_topicos(limit=10, tweets_por_topico=20,desde=None):
+    topicos = get_topics_pending(limit=limit, desde=desde)
+
+    resumen = {
+        "procesados": 0,
+        "stance": 0,
+        "informativos": 0,
+        "mixtos": 0,
+        "fallidos": 0
+    }
+
+    for topico in topicos:
+        topic_id = topico["topic_id"]
+
+        try:
+            tweets = get_tweets_topic(
+                topic_id,
+                limit=tweets_por_topico
+            )
+
+            if not tweets:
+                print(f"Topico {topic_id}: sin publicaciones")
+                resumen["fallidos"] += 1
+                continue
+
+            textos = [t["text"] for t in tweets]
+
+            resultado = analizar_target_topic(
+                topico["topic_name"],
+                textos
+            )
+
+            tipos_validos = {"STANCE", "INFORMATIVO", "MIXTO"}
+            tipo = resultado.get("target_type")
+            confianza = float(resultado["confidence"])
+
+            if tipo not in tipos_validos:
+                raise ValueError("Tipo de target invalido")
+
+            if not 0 <= confianza <= 1:
+                raise ValueError("Confianza invalida")
+
+            if tipo == "STANCE":
+                if not resultado.get("main_target") or not resultado.get("target_description"):
+                    raise ValueError("Target STANCE incompleto")
+            else:
+                resultado["main_target"] = None
+                resultado["target_description"] = None
+
+            resultado["confidence"] = confianza
+
+            update_topic_target(topic_id, resultado)
+
+            resumen["procesados"] += 1
+
+            if tipo == "STANCE":
+                resumen["stance"] += 1
+            elif tipo == "INFORMATIVO":
+                resumen["informativos"] += 1
+            else:
+                resumen["mixtos"] += 1
+
+            print(f"Topico {topic_id}: {tipo}")
+
+        except Exception as e:
+            resumen["fallidos"] += 1
+            print(f"Error en topico {topic_id}: {e}")
+
+    return resumen
+
+
+
+def probar_targets_especificos():
+    topic_ids = [176, 105, 89, 18, 107, 164]
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    try:
+        for topic_id in topic_ids:
+            cursor.execute("""
+                SELECT topic_name
+                FROM topics
+                WHERE topic_id = %s
+            """, (topic_id,))
+
+            topic = cursor.fetchone()
+
+            if not topic:
+                continue
+
+            tweets = get_tweets_topic(topic_id, limit=20)
+
+            if not tweets:
+                print(f"Sin tweets: {topic_id}")
+                continue
+
+            resultado = analizar_target_topic(
+                topic["topic_name"],
+                [t["text"] for t in tweets]
+            )
+
+            print("\n==========================")
+            print("TOPICO:", topic_id)
+            print("NOMBRE:", topic["topic_name"])
+            print("TIPO:", resultado["target_type"])
+            print("TARGET:", resultado["main_target"])
+            print("DESCRIPCION:", resultado["target_description"])
+            print("CONFIANZA:", resultado["confidence"])
+
+    finally:
+        cursor.close()
+        connection.close()
+        
+
+def get_topic_replies_pending(topic_id, limit=20,desde=None):
+    """
+    Obtiene comentarios pendientes de stance
+    para un topico con target definido.
+    """
+
+    connection = get_db_connection()
+    cursor = None
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        query = """
+            SELECT
+                r.replyid,
+                r.tweetid,
+                r.text AS comentario,
+                t.text AS publicacion_original
+            FROM topic_tweets tt
+
+            INNER JOIN topics tp
+                ON tp.topic_id = tt.topic_id
+
+            INNER JOIN Tweets t
+                ON t.tweetid = tt.tweetid
+
+            INNER JOIN replies r
+                ON r.tweetid = t.tweetid
+
+            WHERE tt.topic_id = %s
+              AND tp.target_type = 'STANCE'
+              AND tp.main_target IS NOT NULL
+              AND tp.target_description IS NOT NULL
+
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM topic_reply_stance trs
+                  WHERE trs.replyid = r.replyid
+                    AND trs.topic_id = tt.topic_id
+              )
+
+            ORDER BY r.id ASC
+            LIMIT %s
+        """
+
+        cursor.execute(
+    query,
+    (topic_id, desde, desde, limit)
+)
+
+        return cursor.fetchall()
+
+    finally:
+        if cursor is not None:
+            cursor.close()
+
+        connection.close()
+        
+
+def guardar_stance_topico(topic_id, resultados):
+    """Guarda resultados sin duplicar comentario y tópico."""
+
+    if not resultados:
+        return 0
+
+    etiquetas = {
+        "FAVOR", "CONTRA", "MIXTO",
+        "NEUTRAL", "NO_CLARO"
+    }
+
+    datos = []
+    vistos = set()
+
+    for r in resultados:
+        replyid = int(r["replyid"])
+        stance = r["stance"]
+        confidence = float(r["confidence"])
+
+        if stance not in etiquetas or not 0 <= confidence <= 1:
+            raise ValueError(f"Resultado inválido: {replyid}")
+
+        if replyid in vistos:
+            raise ValueError(f"Comentario duplicado: {replyid}")
+
+        vistos.add(replyid)
+
+        datos.append((
+            replyid,
+            topic_id,
+            stance,
+            confidence,
+            MODEL,
+            "v1"
+        ))
+
+    conn = get_db_connection()
+    cur = None
+
+    try:
+        cur = conn.cursor()
+
+        cur.executemany("""
+            INSERT INTO topic_reply_stance
+            (replyid, topic_id, stance, confidence,
+             model, prompt_version)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE id = id
+        """, datos)
+
+        guardados = cur.rowcount
+        conn.commit()
+        return guardados
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        if cur is not None:
+            cur.close()
+        conn.close()
+
+
+def get_topicos_stance_pendientes(desde, limit=3):
+    conn = get_db_connection()
+    cur = None
+
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        cur.execute("""
+            SELECT
+                tp.topic_id,
+                tp.target_type,
+                tp.main_target,
+                tp.target_description
+            FROM topics tp
+            WHERE tp.active = 1
+              AND tp.target_type = 'STANCE'
+              AND tp.created_at >= %s
+              AND NULLIF(TRIM(tp.main_target), '') IS NOT NULL
+              AND NULLIF(TRIM(tp.target_description), '') IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM topic_tweets tt
+                  JOIN Tweets t
+                    ON t.tweetid = tt.tweetid
+                  JOIN replies r
+                    ON r.tweetid = t.tweetid
+                  LEFT JOIN topic_reply_stance trs
+                    ON trs.replyid = r.replyid
+                   AND trs.topic_id = tp.topic_id
+                  WHERE tt.topic_id = tp.topic_id
+                    AND t.created >= %s
+                    AND trs.id IS NULL
+              )
+            ORDER BY tp.topic_id DESC
+            LIMIT %s
+        """, (desde, desde, limit))
+
+        return cur.fetchall()
+
+    finally:
+        if cur is not None:
+            cur.close()
+        conn.close()
+
+
+def ejecutar_stance_por_topico(
+    desde,
+    max_comentarios=10,
+    tamano_lote=10,
+    max_topicos=2,
+    max_publicaciones=3
+):
+    if not desde:
+        raise ValueError("Falta fecha de inicio")
+
+    if min(max_comentarios, tamano_lote,
+           max_topicos, max_publicaciones) <= 0:
+        raise ValueError("Límites inválidos")
+
+    resumen = {
+        "intentados": 0,
+        "guardados": 0,
+        "fallidos": 0,
+        "topicos": 0,
+        "publicaciones": 0
+    }
+
+    topicos = get_topicos_stance_pendientes(
+        desde=desde,
+        limit=max_topicos
     )
 
-    print(resumen)
+    for topico in topicos:
+        if (
+            resumen["intentados"] >= max_comentarios
+            or resumen["publicaciones"] >= max_publicaciones
+        ):
+            break
+
+        restantes = max_comentarios - resumen["intentados"]
+
+        comentarios = get_topic_replies_pending(
+            topic_id=topico["topic_id"],
+            limit=min(tamano_lote, restantes),
+            desde=desde
+        )
+
+        if not comentarios:
+            continue
+
+        resumen["topicos"] += 1
+
+        grupos = defaultdict(list)
+
+        for comentario in comentarios:
+            grupos[comentario["tweetid"]].append(comentario)
+
+        for lote in grupos.values():
+            if resumen["publicaciones"] >= max_publicaciones:
+                break
+
+            resumen["publicaciones"] += 1
+            resumen["intentados"] += len(lote)
+
+            try:
+                respuesta = clasificar_stance_target(
+                    lote[0]["publicacion_original"],
+                    topico,
+                    lote
+                )
+
+                validacion = validar_resultados_stance(
+                    lote,
+                    respuesta
+                )
+
+                rechazados = set(validacion["duplicados"])
+
+                validos = [
+                    r for r in validacion["validos"]
+                    if str(r["replyid"]) not in rechazados
+                ]
+
+                nuevos = guardar_stance_topico(
+                    topico["topic_id"],
+                    validos
+                )
+
+                resumen["guardados"] += nuevos
+                resumen["fallidos"] += len(lote) - nuevos
+
+            except Exception as e:
+                resumen["fallidos"] += len(lote)
+                print(
+                    f"Error tópico {topico['topic_id']}: {e}"
+                )
+
+    return resumen
 
 
+
+    
+    
+
+if __name__ == "__main__":
+    topic_id = 68
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT target_type, main_target, target_description
+        FROM topics
+        WHERE topic_id = %s
+    """, (topic_id,))
+
+    target = cursor.fetchone()
+
+    cursor.close()
+    connection.close()
+
+    if not target or target["target_type"] != "STANCE":
+        raise ValueError("El tópico no tiene target STANCE válido")
+
+    comentarios = get_topic_replies_pending(
+        topic_id=topic_id,
+        limit=5
+    )
+
+    # Agrupar para usar la publicación original correcta
+    grupos = defaultdict(list)
+
+    for comentario in comentarios:
+        grupos[comentario["tweetid"]].append(comentario)
+
+    for tweetid, lote in grupos.items():
+        print("\nPUBLICACIÓN:", tweetid)
+        print("TARGET:", target["main_target"])
+
+        resultados = clasificar_stance_target(
+            lote[0]["publicacion_original"],
+            target,
+            lote
+        )
+
+        validacion = validar_resultados_stance(
+            lote,
+            resultados
+        )
+
+        for resultado in validacion["validos"]:
+            print(resultado)
+
+        print("Faltantes:", validacion["faltantes"])
+        print("Inválidos:", validacion["invalidos"])
 
 
