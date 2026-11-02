@@ -4,6 +4,8 @@ import json
 import requests
 import json
 
+from main import ejecutar_job_stance
+
 # Comparte la configuración de Cloud SQL con main.py.
 # No almacenes credenciales ni IP públicas en el código fuente.
 DB_CONFIG = {
@@ -2066,3 +2068,14 @@ def ejecutar_stance_por_topico(
 
     
     
+if __name__ == "__main__":
+    
+    # Procesa pendientes entre todas las publicaciones almacenadas,
+    # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
+    ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=50,tamano_lote=50,max_publicaciones=10))
+    
+    targets = ejecutar_targets_topicos(limit=4,tweets_por_topico=50)
+
+    comentarios = ejecutar_stance_por_topico(max_comentarios=50, tamano_lote=50, max_topicos=5, max_publicaciones=10)
+
+     
