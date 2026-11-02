@@ -1517,7 +1517,7 @@ def ejecutar_job_stance(lock_name, tarea):
                 )
 
 
-@app.route("/stance/posts", methods=["POST"])
+@app.route("/stance/posts", methods=["GET"])
 def ejecutar_stance_posts_handler():
     # Procesa pendientes entre todas las publicaciones almacenadas,
     # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
@@ -1531,7 +1531,7 @@ def ejecutar_stance_posts_handler():
     )
 
 
-@app.route("/stance/topics", methods=["POST"])
+@app.route("/stance/topics", methods=["GET"])
 def ejecutar_stance_topics_handler():
     # Primero calcula los targets de topicos que aún no los tengan.
     # Después clasifica comentarios pendientes por topico, sin filtro de fecha.
