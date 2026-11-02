@@ -12,6 +12,7 @@ DB_CONFIG = {
     "password": "Admin123!",
     "database": "Analisis",
     "port": 3306,
+
     
 }
 

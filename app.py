@@ -9,23 +9,25 @@ import sys
 
 # Comparte la configuración de Cloud SQL con main.py.
 # No almacenes credenciales ni IP públicas en el código fuente.
-DB_CONFIG = {
+"""DB_CONFIG = {
     "user": os.environ.get("DB_USER"),
     "password": os.environ.get("DB_PASS"),
     "database": os.environ.get("DB_NAME"),
     "charset": "utf8mb4",
     "port": 3306,
     "connection_timeout": 10,
+}"""
+DB_CONFIG = {
+    
+     "host": "34.69.57.221",      # o la IP de tu contenedor / Cloud SQL
+    "user": "admin",
+    "password": "Admin123!",
+    "database": "Analisis",
+    "port": 3306,
+
+    
 }
 
-_INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
-_DB_HOST = os.environ.get("DB_HOST")
-if _INSTANCE_CONNECTION_NAME:
-    DB_CONFIG["unix_socket"] = f"/cloudsql/{_INSTANCE_CONNECTION_NAME}"
-elif _DB_HOST:
-    DB_CONFIG["host"] = _DB_HOST
-else:
-    raise RuntimeError("Falta INSTANCE_CONNECTION_NAME o DB_HOST para conectarse a MySQL")
 
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")

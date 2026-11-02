@@ -14,7 +14,7 @@ import hashlib
 import base64
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
-from stance import (
+from app import (
     ejecutar_stance_por_target,
     ejecutar_targets_topicos,
     ejecutar_stance_por_topico
