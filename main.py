@@ -1517,7 +1517,7 @@ def ejecutar_job_stance(lock_name, tarea):
             conn.close()
 
 
-@app.route("/stance/posts", methods=["POST"])
+@app.route("/stance/posts", methods=["GET"])
 def ejecutar_stance_posts_handler():
     if not verificar_stance_job():
         return jsonify({"error": "No autorizado"}), 403
@@ -1538,7 +1538,7 @@ def ejecutar_stance_posts_handler():
     )
 
 
-@app.route("/stance/topics", methods=["POST"])
+@app.route("/stance/topics", methods=["GET"])
 def ejecutar_stance_topics_handler():
     if not verificar_stance_job():
         return jsonify({"error": "No autorizado"}), 403
