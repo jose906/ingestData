@@ -1120,6 +1120,7 @@ def ingest_replies_handler():
     cursor = None
     try:
         conn = get_db_connection()
+        conn.autocommit = True
         cursor = conn.cursor()
         cursor.execute(
         "SELECT GET_LOCK('netvora_replies_ingest', 0)"
@@ -1201,7 +1202,7 @@ def ingest_replies_handler():
 
 
         # 3) Procesar pocos tweets por ejecución
-        batch_size = 10
+        batch_size = 5
 
         last_root_id = get_state(cursor,"replies_last_root_id",None)
 
@@ -1273,7 +1274,7 @@ def ingest_replies_handler():
             max_seen_global = get_state(cursor,max_seen_key,None)
             processing_failed = False
             
-            for page in range(2):
+            for page in range(1):
                 data = x_search_conversation(root_tweetid,since_id,next_token)
 
                 if isinstance(data, dict) and data.get("since_id_expired"):
