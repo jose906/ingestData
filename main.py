@@ -1522,13 +1522,7 @@ def ejecutar_job_stance(lock_name, tarea):
 def ejecutar_stance_posts_handler():
     # Procesa pendientes entre todas las publicaciones almacenadas,
     # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
-    return ejecutar_job_stance(
-        "netvora_stance_posts",
-        lambda: ejecutar_stance_por_target(
-            max_comentarios=10,
-            tamano_lote=10,
-            max_publicaciones=3
-        )
+    return ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=50,tamano_lote=50,max_publicaciones=10)
     )
 
 
@@ -1537,17 +1531,9 @@ def ejecutar_stance_topics_handler():
     # Primero calcula los targets de topicos que aún no los tengan.
     # Después clasifica comentarios pendientes por topico, sin filtro de fecha.
     def tarea():
-        targets = ejecutar_targets_topicos(
-            limit=2,
-            tweets_por_topico=20
-        )
+        targets = ejecutar_targets_topicos(limit=4,tweets_por_topico=50)
 
-        comentarios = ejecutar_stance_por_topico(
-            max_comentarios=10,
-            tamano_lote=10,
-            max_topicos=2,
-            max_publicaciones=3
-        )
+        comentarios = ejecutar_stance_por_topico(max_comentarios=50, tamano_lote=50, max_topicos=5, max_publicaciones=10)
 
         return {
             "targets": targets,
