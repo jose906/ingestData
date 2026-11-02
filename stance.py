@@ -2153,43 +2153,13 @@ def ejecutar_stance_job(modo="all"):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Procesar Stance en Cloud Run Jobs (todos los datos, por lotes)."
-    )
-    parser.add_argument("--modo", choices=("all", "posts", "topics"), default="all")
-    args = parser.parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
-
-    try:
-        # Validar la configuración antes de iniciar llamadas a Gemini.
-        if not GEMINI_API_KEY:
-            raise RuntimeError("Falta la variable de entorno GEMINI_API_KEY")
-        resultados = ejecutar_stance_job(args.modo)
-        resumen = {"ok": True, "modo": args.modo, "resultados": resultados}
-        print(json.dumps(resumen, ensure_ascii=False, default=str), flush=True)
-
-        # Fallos por lote se capturan internamente en las funciones de Stance.
-        # Si ocurrieron, no marcar la tarea como exitosa sin avisar.
-        fallidos = 0
-        if "posts" in resultados:
-            fallidos += int(resultados["posts"].get("fallidos", 0))
-        if "topics" in resultados:
-            fallidos += int(resultados["topics"]["targets"].get("fallidos", 0))
-            fallidos += int(resultados["topics"]["comentarios"].get("fallidos", 0))
-        if fallidos:
-            logger.error("Se registraron %d elementos fallidos. Ver logs anteriores.", fallidos)
-            return 1
-        return 0
-
-    except Exception:
-        logger.exception("Error fatal ejecutando Stance Job")
-        return 1
+    ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=50,tamano_lote=50,max_publicaciones=10))
+    targets = ejecutar_targets_topicos(limit=4,tweets_por_topico=50)
+    
+    comentarios = ejecutar_stance_por_topico(max_comentarios=50, tamano_lote=50, max_topicos=5, max_publicaciones=10)
+    
+    
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
