@@ -4,13 +4,25 @@ import json
 import requests
 import json
 
+# Comparte la configuración de Cloud SQL con main.py.
+# No almacenes credenciales ni IP públicas en el código fuente.
 DB_CONFIG = {
-    "host": "34.69.57.221",
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
+    "user": os.environ.get("DB_USER"),
+    "password": os.environ.get("DB_PASS"),
+    "database": os.environ.get("DB_NAME"),
+    "charset": "utf8mb4",
     "port": 3306,
+    "connection_timeout": 10,
 }
+
+_INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
+_DB_HOST = os.environ.get("DB_HOST")
+if _INSTANCE_CONNECTION_NAME:
+    DB_CONFIG["unix_socket"] = f"/cloudsql/{_INSTANCE_CONNECTION_NAME}"
+elif _DB_HOST:
+    DB_CONFIG["host"] = _DB_HOST
+else:
+    raise RuntimeError("Falta INSTANCE_CONNECTION_NAME o DB_HOST para conectarse a MySQL")
 
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -693,14 +705,12 @@ def get_topics_pending(limit=10, desde=None):
             topic_name
         FROM topics
         WHERE target_type IS NULL
-          AND active = 1
-          AND (%s IS NULL OR created_at >= %s)
         ORDER BY total_tweets DESC
         LIMIT %s
     """
 
     cursor = connection.cursor(dictionary=True)
-    cursor.execute(query, (desde, desde, limit))
+    cursor.execute(query, (limit,))
     resultados = cursor.fetchall()
 
     cursor.close()
@@ -1472,7 +1482,6 @@ def get_siguiente_publicacion_target(last_tweetid=0, desde=None):
             LEFT JOIN post_targets pt
                 ON pt.tweetid = t.tweetid
             WHERE t.tweetid > %s
-            AND (%s IS NULL OR t.created >= %s)
             
               AND (
                   (
@@ -1501,7 +1510,7 @@ def get_siguiente_publicacion_target(last_tweetid=0, desde=None):
               )
             ORDER BY t.tweetid ASC
             LIMIT 1
-        """,(last_tweetid, desde, desde))
+        """, (last_tweetid,))
 
         return cursor.fetchone()
 
@@ -1845,10 +1854,7 @@ def get_topic_replies_pending(topic_id, limit=20,desde=None):
             LIMIT %s
         """
 
-        cursor.execute(
-    query,
-    (topic_id, desde, desde, limit)
-)
+        cursor.execute(query, (topic_id, limit))
 
         return cursor.fetchall()
 
@@ -1923,7 +1929,7 @@ def guardar_stance_topico(topic_id, resultados):
         conn.close()
 
 
-def get_topicos_stance_pendientes(desde, limit=3):
+def get_topicos_stance_pendientes(desde=None, limit=3):
     conn = get_db_connection()
     cur = None
 
@@ -1937,9 +1943,7 @@ def get_topicos_stance_pendientes(desde, limit=3):
                 tp.main_target,
                 tp.target_description
             FROM topics tp
-            WHERE tp.active = 1
-              AND tp.target_type = 'STANCE'
-              AND tp.created_at >= %s
+            WHERE tp.target_type = 'STANCE'
               AND NULLIF(TRIM(tp.main_target), '') IS NOT NULL
               AND NULLIF(TRIM(tp.target_description), '') IS NOT NULL
               AND EXISTS (
@@ -1953,12 +1957,11 @@ def get_topicos_stance_pendientes(desde, limit=3):
                     ON trs.replyid = r.replyid
                    AND trs.topic_id = tp.topic_id
                   WHERE tt.topic_id = tp.topic_id
-                    AND t.created >= %s
                     AND trs.id IS NULL
               )
             ORDER BY tp.topic_id DESC
             LIMIT %s
-        """, (desde, desde, limit))
+        """, (limit,))
 
         return cur.fetchall()
 
@@ -1969,15 +1972,12 @@ def get_topicos_stance_pendientes(desde, limit=3):
 
 
 def ejecutar_stance_por_topico(
-    desde,
+    desde=None,
     max_comentarios=10,
     tamano_lote=10,
     max_topicos=2,
     max_publicaciones=3
 ):
-    if not desde:
-        raise ValueError("Falta fecha de inicio")
-
     if min(max_comentarios, tamano_lote,
            max_topicos, max_publicaciones) <= 0:
         raise ValueError("Límites inválidos")

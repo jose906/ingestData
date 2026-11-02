@@ -1456,15 +1456,6 @@ def webhook():
     
     
 
-def verificar_stance_job():
-    esperado = os.environ.get("STANCE_JOB_TOKEN", "")
-    recibido = request.headers.get("X-Stance-Token", "")
-
-    return bool(esperado) and hmac.compare_digest(
-        esperado, recibido
-    )
-
-
 def ejecutar_job_stance(lock_name, tarea):
     conn = None
     cur = None
@@ -1495,6 +1486,7 @@ def ejecutar_job_stance(lock_name, tarea):
         }), 200
 
     except Exception as e:
+        app.logger.exception("Fallo en job Stance: %s", lock_name)
         return jsonify({
             "ok": False,
             "error": str(e)
@@ -1504,21 +1496,31 @@ def ejecutar_job_stance(lock_name, tarea):
         if cur is not None:
             if adquirido:
                 try:
-                    cur.execute(
-                        "SELECT RELEASE_LOCK(%s)",
-                        (lock_name,)
+                    cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+                    cur.fetchone()  # Consumir SELECT antes de cerrar el cursor.
+                except Exception as cleanup_error:
+                    app.logger.warning(
+                        "No se pudo liberar el lock %s: %s", lock_name, cleanup_error
                     )
-                except Exception:
-                    pass
-
-            cur.close()
-
+            try:
+                cur.close()
+            except Exception as cleanup_error:
+                app.logger.warning(
+                    "Error cerrando cursor de Stance: %s", cleanup_error
+                )
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as cleanup_error:
+                app.logger.warning(
+                    "Error cerrando conexión de Stance: %s", cleanup_error
+                )
 
 
-@app.route("/stance/posts", methods=["GET"])
+@app.route("/stance/posts", methods=["POST"])
 def ejecutar_stance_posts_handler():
+    # Procesa pendientes entre todas las publicaciones almacenadas,
+    # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
     return ejecutar_job_stance(
         "netvora_stance_posts",
         lambda: ejecutar_stance_por_target(
@@ -1529,9 +1531,10 @@ def ejecutar_stance_posts_handler():
     )
 
 
-@app.route("/stance/topics", methods=["GET"])
+@app.route("/stance/topics", methods=["POST"])
 def ejecutar_stance_topics_handler():
-
+    # Primero calcula los targets de topicos que aún no los tengan.
+    # Después clasifica comentarios pendientes por topico, sin filtro de fecha.
     def tarea():
         targets = ejecutar_targets_topicos(
             limit=2,
