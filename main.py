@@ -1519,42 +1519,26 @@ def ejecutar_job_stance(lock_name, tarea):
 
 @app.route("/stance/posts", methods=["GET"])
 def ejecutar_stance_posts_handler():
-    
-
-    desde = os.environ.get("STANCE_DESDE")
-
-    if not desde:
-        return jsonify({"error": "Falta STANCE_DESDE"}), 503
-
     return ejecutar_job_stance(
         "netvora_stance_posts",
         lambda: ejecutar_stance_por_target(
             max_comentarios=10,
             tamano_lote=10,
-            max_publicaciones=3,
-            desde=desde
+            max_publicaciones=3
         )
     )
 
 
 @app.route("/stance/topics", methods=["GET"])
 def ejecutar_stance_topics_handler():
-    
-
-    desde = os.environ.get("STANCE_DESDE")
-
-    if not desde:
-        return jsonify({"error": "Falta STANCE_DESDE"}), 503
 
     def tarea():
         targets = ejecutar_targets_topicos(
             limit=2,
-            tweets_por_topico=20,
-            desde=desde
+            tweets_por_topico=20
         )
 
         comentarios = ejecutar_stance_por_topico(
-            desde=desde,
             max_comentarios=10,
             tamano_lote=10,
             max_topicos=2,
@@ -1570,7 +1554,6 @@ def ejecutar_stance_topics_handler():
         "netvora_stance_topics",
         tarea
     )
-
 
 
 @app.route("/selectTopics", methods=["GET"])
