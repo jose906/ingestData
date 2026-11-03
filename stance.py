@@ -9,24 +9,17 @@ import sys
 
 # Comparte la configuración de Cloud SQL con main.py.
 # No almacenes credenciales ni IP públicas en el código fuente.
-"""DB_CONFIG = {
+DB_CONFIG = {
     "user": os.environ.get("DB_USER"),
     "password": os.environ.get("DB_PASS"),
     "database": os.environ.get("DB_NAME"),
     "charset": "utf8mb4",
     "port": 3306,
     "connection_timeout": 10,
-}"""
-DB_CONFIG = {
-    
-     "host": "34.69.57.221",      # o la IP de tu contenedor / Cloud SQL
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
-    "port": 3306,
-
-    
 }
+
+
+
 
 
 
@@ -2155,10 +2148,10 @@ def ejecutar_stance_job(modo="all"):
 
 
 def main():
-    ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=50,tamano_lote=50,max_publicaciones=10))
-    targets = ejecutar_targets_topicos(limit=4,tweets_por_topico=50)
+    ejecutar_job_stance( "netvora_stance_posts",lambda: ejecutar_stance_por_target(max_comentarios=1000,tamano_lote=200,max_publicaciones=1000))
+    targets = ejecutar_targets_topicos(limit=10,tweets_por_topico=100)
     
-    comentarios = ejecutar_stance_por_topico(max_comentarios=50, tamano_lote=50, max_topicos=5, max_publicaciones=10)
+    comentarios = ejecutar_stance_por_topico(max_comentarios=1000, tamano_lote=100, max_topicos=10, max_publicaciones=1000)
     
     
 
