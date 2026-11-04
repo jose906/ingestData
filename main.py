@@ -585,7 +585,8 @@ def update_all():
             """
             UPDATE TweetUser
             SET tweets_procesados = 0
-            WHERE pagination_token IS NULL
+            WHERE tweets_procesados = 1
+            AND pagination_token IS NULL
             """
         )
 
