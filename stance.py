@@ -1,9 +1,9 @@
 
-import argparse
+
 import json
-import logging
+
 import os
-import sys
+
 from collections import defaultdict
 
 import mysql.connector
@@ -34,7 +34,6 @@ elif DB_HOST:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
-logger = logging.getLogger("netvora.stance")
 
 VALIDOS = {
     "FAVOR",
@@ -146,10 +145,8 @@ def llamar_gemini(prompt):
     )
 
     if not respuesta.ok:
-        logger.error(
-            "Error Gemini HTTP %s: %s",
-            respuesta.status_code,
-            respuesta.text[:1000]
+        print(
+            f"Error Gemini HTTP {respuesta.status_code}: {respuesta.text[:1000]}"
         )
         respuesta.raise_for_status()
 
@@ -722,11 +719,10 @@ def ejecutar_stance_por_target(
                         len(comentarios) - guardados
                     )
 
-                    logger.info(
-                        "Tweet %s: enviados=%s guardados=%s",
-                        tweetid,
-                        len(comentarios),
-                        guardados
+                    print(
+                        f"Tweet {tweetid}: "
+                        f"enviados={len(comentarios)} "
+                        f"guardados={guardados}"
                     )
 
                     if guardados < len(comentarios):
@@ -737,18 +733,15 @@ def ejecutar_stance_por_target(
                         comentarios
                     )
 
-                    logger.exception(
-                        "Error clasificando comentarios del tweet %s",
-                        tweetid
-                    )
+                    print( f"Error clasificando comentarios del tweet {tweetid}")
                     break
 
         except Exception:
             resumen["fallidos"] += 1
 
-            logger.exception(
-                "Error analizando la publicacion %s",
-                tweetid
+            print(
+                f"Error analizando target del tweet {tweetid}",
+               
             )
 
     return resumen
@@ -841,9 +834,8 @@ def ejecutar_targets_topicos(
             )
 
             if not tweets:
-                logger.warning(
-                    "Topico %s sin publicaciones",
-                    topico["topic_id"]
+                print(
+                    f"Topico {topico['topic_id']} sin tweets"
                 )
 
                 resumen["fallidos"] += 1
@@ -874,18 +866,15 @@ def ejecutar_targets_topicos(
 
             resumen[clave] += 1
 
-            logger.info(
-                "Topico %s: %s",
-                topico["topic_id"],
-                nombre
+            print(
+                f"Topico {topico['topic_id']}: {nombre}"
             )
 
         except Exception:
             resumen["fallidos"] += 1
 
-            logger.exception(
-                "Error analizando target de topico %s",
-                topico["topic_id"]
+            print(
+                f"Error analizando target de topico {topico['topic_id']}"
             )
 
     return resumen
@@ -1096,19 +1085,17 @@ def ejecutar_stance_por_topico(
                     len(lote) - guardados
                 )
 
-                logger.info(
-                    "Topico %s: enviados=%s guardados=%s",
-                    topico["topic_id"],
-                    len(lote),
-                    guardados
-                )
+                print(
+                    f"Topico {topico['topic_id']}: "
+                    f"enviados={len(lote)} "
+                    f"guardados={guardados}" )
 
             except Exception:
                 resumen["fallidos"] += len(lote)
 
-                logger.exception(
-                    "Error clasificando topico %s",
-                    topico["topic_id"]
+                print(
+                    f"Error clasificando comentarios del topico {topico['topic_id']}",
+                    
                 )
 
     return resumen
@@ -1146,20 +1133,12 @@ def ejecutar_job_stance(
                 f"El proceso {lock_name} ya esta en ejecucion"
             )
 
-        logger.info(
-            "Iniciando %s",
-            lock_name
-        )
+        print(f"Iniciando {lock_name}...")
 
         resultado = tarea()
 
-        logger.info(
-            "Termino %s: %s",
-            lock_name,
-            json.dumps(
-                resultado,
-                ensure_ascii=False
-            )
+        print(
+            f"Finalizado {lock_name}: {json.dumps(resultado, ensure_ascii=False)}"
         )
 
         return resultado
@@ -1175,16 +1154,17 @@ def ejecutar_job_stance(
                     cur.fetchone()
 
                 except Exception:
-                    logger.exception(
-                        "No se pudo liberar el bloqueo %s",
-                        lock_name
+                    print(
+                        "No se pudo liberar el lock",
+                       
                     )
 
             try:
                 cur.close()
             except Exception:
-                logger.exception(
-                    "Error cerrando cursor"
+                print(
+                    "No se pudo cerrar el cursor",
+                   
                 )
 
         conn.close()
