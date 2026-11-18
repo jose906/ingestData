@@ -61,7 +61,7 @@ def authorize_job():
 
     expected = os.getenv("INGEST_JOB_TOKEN")
     if not expected:
-        return jsonify({"ok": False, "error": "Autorización sin configurar"}), 503
+        return None
     authorization = request.headers.get("Authorization", "")
     if not hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):
         return jsonify({"ok": False, "error": "No autorizado"}), 401
@@ -1311,7 +1311,7 @@ def ejecutar_job_stance(lock_name, tarea):
         close_job_connection(conn, cur, lock_name, adquirido)
 
 
-@app.route("/stance/posts", methods=["POST"])
+@app.route("/stance/posts", methods=["GET"])
 def ejecutar_stance_posts_handler():
     # Procesa pendientes entre todas las publicaciones almacenadas,
     # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.

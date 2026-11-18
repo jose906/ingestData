@@ -6,9 +6,9 @@ Copia `.env.example` a `.env` para Docker Compose y completa los valores con cre
 
 - Para MySQL por TCP, configura `DB_HOST` y `DB_PORT`.
 - Para Cloud SQL por socket, configura `INSTANCE_CONNECTION_NAME` y monta el socket del servicio bajo `/cloudsql`.
-- Elige un valor aleatorio para `INGEST_JOB_TOKEN` y guárdalo también en el programador que llama a los trabajos.
+- Si quieres proteger las rutas de trabajo con un token, configura `INGEST_JOB_TOKEN` en el servicio y en el programador.
 
-Con `docker compose -f docker_compose.yaml up --build`, Flask queda disponible en el puerto 8080. Las rutas de trabajos usan `POST` con `Authorization: Bearer <INGEST_JOB_TOKEN>`.
+Con `docker compose -f docker_compose.yaml up --build`, Flask queda disponible en el puerto 8080. Llama a las rutas de trabajo con `GET`. Si configuraste `INGEST_JOB_TOKEN`, incluye el encabezado `Authorization: Bearer <INGEST_JOB_TOKEN>` en cada solicitud.
 
 Para ejecutar ambos trabajos desde la terminal, usa `JOB_MODE=both python worker_replies.py`. También puedes elegir `ingest` o `replies`. Para Stance por publicación, ejecuta `python app.py`.
 
