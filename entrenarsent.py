@@ -149,6 +149,6 @@ print(confusion_matrix(y_test, y_pred))
 import joblib
 
 # Save the model
-joblib.dump(svm_sentimiento, 'svm_sentimiento_classifier.joblib')
+joblib.dump(svm_sentimiento, 'model/svm_sentiment_classifier2.joblib')
 
-print("Model saved as svm_sentimiento_classifier.joblib")
+print("Model saved as model/svm_sentiment_classifier2.joblib")

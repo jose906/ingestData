@@ -1,34 +1,19 @@
+from database import get_db_connection
 # 1. Cargar modelo
 
-import re ,os,json
-import mysql.connector 
+import json
+import re
 from sentence_transformers import SentenceTransformer
    
     
 
 model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-model = SentenceTransformer(model_name)
 
 
-DB_CONFIG = {
-            # IP pública o nombre interno de Cloud SQL
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASS"),
-    "database": os.environ.get("DB_NAME"),
-    "unix_socket": f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}",
-    "charset": "utf8mb4",
-    "port": "3306",
-}
 
   
       
       
-
-def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
-
-
-  
 
 
 def limpiar_tweet(texto):
@@ -38,7 +23,7 @@ def limpiar_tweet(texto):
     texto = re.sub(r"\s+", " ", texto).strip()
     texto = re.sub(r'[★☆◆◉•▪🔴🟡🟠✅✔️✳️🔹🔸▶️🔻🔺]+', ' ', texto)
     texto = re.sub(r'\s[-–—]{2,}\s', ' ', texto)
-    text = re.sub(r'(?i)\bRT\b\s*:?', ' ', texto)
+    texto = re.sub(r'(?i)\bRT\b\s*:?', ' ', texto)
 
     # menciones
     texto = re.sub(r'(?<!\w)@\w+', ' ', texto)
@@ -107,6 +92,7 @@ def insert_embeddings():
             
             #embedding = model.encode(texto).tolist()
         
+        model = SentenceTransformer(model_name)
         embeddings = model.encode(texts_texts, batch_size=32,show_progress_bar=True,normalize_embeddings=True)
         data = data_to_insert(embeddings, texts_texts, tweet_ids)
         query = """
@@ -127,21 +113,25 @@ def insert_embeddings():
         """
 
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = None
 
         try:
+            cur = conn.cursor()
             cur.executemany(query, data)
             conn.commit()
 
             print(f"Embeddings guardados/actualizados: {cur.rowcount}")
 
-        except Exception as e:
+        except Exception:
             conn.rollback()
-            print("Error guardando embeddings:", e)
+            raise
 
         finally:
-            cur.close()
-            conn.close()
+            try:
+                if cur is not None:
+                    cur.close()
+            finally:
+                conn.close()
                 
         print(f"Embeddings creados para {len(tweets)} tweets")
         return len(tweets)

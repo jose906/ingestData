@@ -1,34 +1,18 @@
+from contextlib import closing
+from database import get_db_connection
 import re
 import json
-import mysql.connector
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
-import os
 import helper
 
 
 URL_REGEX = re.compile(r"https?://\S+|www\.\S+")
 UMBRAL = 0.8
 
-"""DB_CONFIG = {
-    "host": "34.69.57.221",
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
-    "port": 3306,
-}"""
 
-DB_CONFIG = {
-            # IP pública o nombre interno de Cloud SQL
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASS"),
-    "database": os.environ.get("DB_NAME"),
-    "unix_socket": f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}",
-    "charset": "utf8mb4",
-    "port": "3306",
-}
   
 
 TOPICS_ESPECIALES = [
@@ -42,48 +26,22 @@ TOPICS_ESPECIALES = [
 ]
 
 
-def get_db_connection():
-    required_vars = [
-        "DB_USER",
-        "DB_PASS",
-        "DB_NAME",
-        "INSTANCE_CONNECTION_NAME"
-    ]
-
-    missing = [
-        var
-        for var in required_vars
-        if not os.environ.get(var)
-    ]
-
-    if missing:
-        raise RuntimeError(
-            f"Faltan variables de entorno: {', '.join(missing)}"
-        )
-
-    return mysql.connector.connect(**DB_CONFIG)
-
 
 def get_topic_embeddings():
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
 
-    placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
+        query = f"""
+            SELECT te.topic_id, te.embedding_vector
+            FROM topic_embeddings te
+            JOIN topics t
+                ON t.topic_id = te.topic_id
+            WHERE t.topic_name NOT IN ({placeholders})
+            ORDER BY te.topic_id
+        """
 
-    query = f"""
-        SELECT te.topic_id, te.embedding_vector
-        FROM topic_embeddings te
-        JOIN topics t
-            ON t.topic_id = te.topic_id
-        WHERE t.topic_name NOT IN ({placeholders})
-        ORDER BY te.topic_id
-    """
-
-    cursor.execute(query, TOPICS_ESPECIALES)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+        cursor.execute(query, TOPICS_ESPECIALES)
+        results = cursor.fetchall()
 
     topics = []
 
@@ -97,28 +55,23 @@ def get_topic_embeddings():
 
 
 def get_tweet_embedding():
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        query = """
+            SELECT
+                t.tweetid,
+                t.text,
+                e.embedding_vector
+            FROM Tweets t
+            JOIN tweet_embeddings e
+                ON t.tweetid = e.tweetid
+            LEFT JOIN topic_tweets tt
+                ON t.tweetid = tt.tweetid
+            WHERE tt.tweetid IS NULL
+              AND t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL 14 DAY
+        """
 
-    query = """
-        SELECT 
-            t.tweetid,
-            t.text,
-            e.embedding_vector
-        FROM Tweets t
-        JOIN tweet_embeddings e 
-            ON t.tweetid = e.tweetid
-        LEFT JOIN topic_tweets tt 
-            ON t.tweetid = tt.tweetid
-        WHERE tt.tweetid IS NULL
-          AND t.created >= NOW() - INTERVAL 14 DAY
-    """
-
-    cursor.execute(query)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+        cursor.execute(query)
+        results = cursor.fetchall()
 
     tweets = []
 
@@ -133,22 +86,17 @@ def get_tweet_embedding():
 
 def get_especial_topics():
 
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
 
-    placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
+        query = f"""
+            SELECT topic_id, topic_name
+            FROM topics
+            WHERE topic_name IN ({placeholders})
+        """
 
-    query = f"""
-        SELECT topic_id, topic_name
-        FROM topics
-        WHERE topic_name IN ({placeholders})
-    """
-
-    cursor.execute(query, TOPICS_ESPECIALES)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+        cursor.execute(query, TOPICS_ESPECIALES)
+        results = cursor.fetchall()
 
     topicos = {}
 
@@ -158,7 +106,7 @@ def get_especial_topics():
     return topicos
 
 
-def insert_tweets_topic(df):
+def insert_tweets_topic(df, ids_especiales):
     if df.empty:
         print("No hay tweets para insertar")
         return
@@ -168,7 +116,7 @@ def insert_tweets_topic(df):
 
     try:
         connection = get_db_connection()
-        cursor = connection.cursor()
+        cursor = connection.cursor(dictionary=True)
 
         insert_query = """
             INSERT INTO topic_tweets 
@@ -222,6 +170,9 @@ def insert_tweets_topic(df):
             data_update
         )
 
+        for topic_id in sorted(conteo_topics.keys() - ids_especiales):
+            recalcular_centroide_topic(cursor, topic_id)
+
         connection.commit()
 
         print("Tweets insertados:", len(tweets_topic))
@@ -238,17 +189,15 @@ def insert_tweets_topic(df):
 
     finally:
 
-        if cursor:
-            cursor.close()
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            if connection is not None:
+                connection.close()
 
-        if connection:
-            connection.close()
 
-
-def recalcular_centroide_topic(topic_id):
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
-
+def recalcular_centroide_topic(cursor, topic_id):
     query = """
         SELECT e.embedding_vector
         FROM topic_tweets tt
@@ -261,8 +210,6 @@ def recalcular_centroide_topic(topic_id):
     results = cursor.fetchall()
 
     if not results:
-        cursor.close()
-        connection.close()
         return
 
     embeddings = np.array(
@@ -300,9 +247,6 @@ def recalcular_centroide_topic(topic_id):
         )
     )
 
-    connection.commit()
-    cursor.close()
-    connection.close()
 
     print(f"Centroide actualizado para topic {topic_id}")
 
@@ -452,27 +396,7 @@ def classify_tweets():
     # 5. Guardar asignaciones
     # -----------------------------------------
 
-    insert_tweets_topic(
-        pd.DataFrame(asignados)
-    )
-
-    # -----------------------------------------
-    # 6. Actualizar centroides solo normales
-    # -----------------------------------------
-
-    if asignados:
-        ids_especiales = set(
-            topicos_especiales.values()
-        )
-
-        topics_actualizados = {
-            item["topic_id"]
-            for item in asignados
-            if item["topic_id"] not in ids_especiales
-        }
-
-        for topic_id in topics_actualizados:
-            recalcular_centroide_topic(topic_id)
+    insert_tweets_topic(pd.DataFrame(asignados), set(topicos_especiales.values()))
 
     return (
         pd.DataFrame(no_asignados),

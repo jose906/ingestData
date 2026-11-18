@@ -1,6 +1,5 @@
-import mysql.connector
+from database import get_db_connection
 import os
-import time
 import pandas as pd
 from google import genai
 import json
@@ -9,21 +8,7 @@ import traceback
 
 
 
-DB_CONFIG = {
-            # IP pública o nombre interno de Cloud SQL
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASS"),
-    "database": os.environ.get("DB_NAME"),
-    "unix_socket": f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}",
-    "charset": "utf8mb4",
-    "port": "3306",
-}
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
 
 
 def get_topics(limit_topics=2):
@@ -213,15 +198,20 @@ PUBLICACIONES:
         ]
     }
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-            response_schema=schema
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("Falta GEMINI_API_KEY")
+    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=90000)) as client:
+        response = client.models.generate_content(
+            model=os.getenv("GEMINI_MODEL") or "gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=schema
+            )
         )
-    )
+
 
     if not response.text:
         raise ValueError("Gemini devolvió una respuesta vacía")
@@ -270,12 +260,13 @@ PUBLICACIONES:
 def procesar_resultados_topics(df):
 
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = None
 
     actualizados = 0
     eliminados = 0
 
     try:
+        cursor = conn.cursor()
         conn.start_transaction()
 
         for _, row in df.iterrows():
@@ -364,8 +355,11 @@ def procesar_resultados_topics(df):
 
     finally:
 
-        cursor.close()
-        conn.close()
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            conn.close()
 
 
 def insertar_nuevos_topicos(

@@ -1,3 +1,4 @@
+from database import get_db_connection
 
 
 import json
@@ -6,7 +7,6 @@ import os
 
 from collections import defaultdict
 
-import mysql.connector
 import requests
 
 
@@ -14,25 +14,9 @@ import requests
 # CONFIGURACION
 # ============================================================
 
-DB_CONFIG = {
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASS"),
-    "database": os.environ.get("DB_NAME"),
-    "port": 3306,
-    "charset": "utf8mb4",
-    "connection_timeout": 10,
-}
-
-INSTANCE = os.environ.get("INSTANCE_CONNECTION_NAME")
-DB_HOST = os.environ.get("DB_HOST")
-
-if INSTANCE:
-    DB_CONFIG["unix_socket"] = f"/cloudsql/{INSTANCE}"
-elif DB_HOST:
-    DB_CONFIG["host"] = DB_HOST
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 
 
 VALIDOS = {
@@ -43,13 +27,6 @@ VALIDOS = {
     "NO_CLARO"
 }
 
-
-def get_db_connection():
-    if not (INSTANCE or DB_HOST):
-        raise RuntimeError(
-            "Falta INSTANCE_CONNECTION_NAME o DB_HOST"
-        )
-    return mysql.connector.connect(**DB_CONFIG)
 
 
 def consultar_uno(sql, params=()):

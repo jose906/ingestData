@@ -1,3 +1,4 @@
+from database import get_db_connection
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
@@ -5,12 +6,9 @@ from flask import Flask, jsonify, request
 import requests
 import sklearn
 import MLModel
-import mysql.connector
 from mysql.connector import Error
 import time
-from dateutil import parser as dtparser
 import hmac
-import hashlib
 import base64
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
@@ -24,29 +22,17 @@ from stance import (
 
 # ================== CONFIG ==================
 
-DB_CONFIG = {
-            # IP pública o nombre interno de Cloud SQL
-    "user": os.environ.get("DB_USER"),
-    "password": os.environ.get("DB_PASS"),
-    "database": os.environ.get("DB_NAME"),
-    "unix_socket": f"/cloudsql/{os.environ.get('INSTANCE_CONNECTION_NAME')}",
-    "charset": "utf8mb4",
-    "port": "3306",
-}
   
 
 
 
-#TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
-TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN")
-CONSUMER_SECRET = os.environ.get("CONSUMER_SECRET")
-CONSUMER_SECRET_KEY = os.environ.get("CONSUMER_SECRET_KEY")
-if not TWITTER_BEARER_TOKEN:
-    raise RuntimeError("Falta TWITTER_BEARER_TOKEN en variables de entorno")
+def x_headers():
+    token = os.getenv("TWITTER_BEARER_TOKEN")
+    if not token:
+        raise RuntimeError("Falta TWITTER_BEARER_TOKEN")
+    return {"Authorization": f"Bearer {token}"}
 
-headers = {
-    "Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"
-}
+
 TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
 #TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
 
@@ -64,13 +50,52 @@ BOLIVIA_TZ = timezone(timedelta(hours=-4))
 
 app = Flask(__name__)
 
+@app.before_request
+def authorize_job():
+    if request.endpoint not in {
+        "ingest_handler", "ingest_replies_handler", "reprocess_handler",
+        "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
+        "select_topics", "create_topics",
+    }:
+        return None
+
+    expected = os.getenv("INGEST_JOB_TOKEN")
+    if not expected:
+        return jsonify({"ok": False, "error": "Autorización sin configurar"}), 503
+    authorization = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):
+        return jsonify({"ok": False, "error": "No autorizado"}), 401
+    return None
+
+
+def rollback_job(conn):
+    try:
+        conn.rollback()
+    except Error:
+        app.logger.warning("Fallo revirtiendo transacción MySQL", exc_info=True)
+
+
+def close_job_connection(conn, cursor, lock_name, acquired):
+    if cursor is not None:
+        if acquired:
+            try:
+                cursor.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+                cursor.fetchone()
+            except Exception:
+                app.logger.warning("Fallo liberando %s", lock_name, exc_info=True)
+        try:
+            cursor.close()
+        except Exception:
+            app.logger.warning("Fallo cerrando cursor MySQL", exc_info=True)
+
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            app.logger.warning("Fallo cerrando conexión MySQL", exc_info=True)
+
+
 # ================== FUNCIONES BD ==================
-
-def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
-
-
-
 
 
 # ================== INSERT TWEETS ==================
@@ -223,6 +248,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
 def reprocess_pending_tweets(limit=100):
     conn = None
     cur = None
+    acquired = False
 
     procesados = 0
     errores = 0
@@ -236,26 +262,14 @@ def reprocess_pending_tweets(limit=100):
 
         lock_result = cur.fetchone()
 
-        if not lock_result or lock_result["acquired"] != 1:
+        acquired = bool(lock_result and lock_result["acquired"] == 1)
+        if not acquired:
             return {
                 "ok": True,
                 "busy": True,
                 "procesados": 0,
                 "message": "Ya existe otra ejecución de reprocesamiento ML."
             }
-        cur.execute("""
-            SELECT
-                DATABASE() AS database_name,
-                @@hostname AS mysql_host,
-                COUNT(*) AS pendientes
-            FROM Tweets
-            WHERE ml_procesado = 0
-        """)
-
-        debug_db = cur.fetchone()
-
-        print(f"DEBUG DB: {debug_db}")
-
         # Buscar solamente tweets pendientes
         cur.execute(
             """
@@ -289,82 +303,48 @@ def reprocess_pending_tweets(limit=100):
                 sentimiento = MLModel.get_sentiment(text)[0]
                 categoria = MLModel.predecir_categoria(text)[0]
 
-                cur.execute(
-                    """
-                    UPDATE Tweets
-                    SET
-                        sentimiento = %s,
-                        categoria = %s,
-                        ml_procesado = 1
-                    WHERE tweetid = %s
-                    """,
-                    (
-                        sentimiento,
-                        categoria,
-                        tweet_id
-                    )
-                )
-
-                procesados += 1
-
-            except Exception as e:
+            except Exception:
                 errores += 1
+                app.logger.exception("Error clasificando tweet %s", tweet_id)
+                continue
 
-                print(
-                    f"❌ Error reprocesando tweet "
-                    f"{tweet_id}: {e}"
-                )
+            cur.execute(
+                """
+                UPDATE Tweets
+                SET sentimiento = %s, categoria = %s, ml_procesado = 1
+                WHERE tweetid = %s
+                """,
+                (sentimiento, categoria, tweet_id),
+            )
+            procesados += 1
 
         conn.commit()
 
         return {
-            "ok": True,
+            "ok": errores == 0,
             "procesados": procesados,
             "errores": errores,
             "total_encontrados": len(tweets),
-            "database": debug_db["database_name"],
-            "mysql_host": debug_db["mysql_host"],
-            "pendientes_antes": debug_db["pendientes"],
             
         }
 
-    except Exception as e:
+    except Exception:
+        if conn is not None:
+            rollback_job(conn)
 
-        if conn:
-            conn.rollback()
-
-        print(
-            f"❌ Error general reprocesando tweets: {e}"
-        )
+        app.logger.exception("Fallo reprocesando tweets")
 
         return {
             "ok": False,
-            "procesados": procesados,
+            "procesados": 0,
             "errores": errores,
-            "error": str(e)
+            "error": "Falló el reprocesamiento"
         }
 
     finally:
+        close_job_connection(conn, cur, "netvora_ml_reprocess", acquired)
 
-        if cur and conn:
-            try:
-                cur.execute(
-                    "SELECT RELEASE_LOCK('netvora_ml_reprocess')"
-                )
-            except Exception:
-                pass
 
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 # ================== TIME HELPERS ==================
 
@@ -377,6 +357,22 @@ def bolivia_day_start_utc_iso():
     start_utc = start_bo.astimezone(timezone.utc)
     return start_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
+
+def invalid_x_pagination(error_text):
+    return any(field in error_text for field in ("next_token", "pagination_token"))
+
+
+def parse_x_page(data):
+    if not isinstance(data, dict) or "meta" not in data:
+        raise ValueError("Respuesta de búsqueda de X incompleta")
+    tweets = data.get("data", [])
+    meta = data["meta"]
+    if not isinstance(tweets, list) or not isinstance(meta, dict):
+        raise ValueError("Formato de página de X inválido")
+    if data.get("errors"):
+        raise ValueError("X devolvió una página con errores")
+    return tweets, meta
 
 
 def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None):
@@ -401,7 +397,7 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
     try:
         response = requests.get(
             TWEETS_URL,
-            headers=headers,
+            headers=x_headers(),
             params=params,
             timeout=20
         )
@@ -431,7 +427,10 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
         except Exception:
             error_text = response.text
 
-        if "since_id" in error_text:
+        if pagination_token and invalid_x_pagination(error_text):
+            return {"ok": False, "reset_pagination": True}
+
+        if "since_id" in params and "since_id" in error_text and "must be a tweet id created after" in error_text:
             return {
                 "ok": False,
                 "rate_limit": False,
@@ -447,33 +446,17 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
             "rate_limit": False,
             "tweets": [],
             "next_token": pagination_token,
-            "error": (
-                f"X API error {response.status_code}: "
-                f"{response.text}"
-            )
+            "error": f"X devolvió HTTP {response.status_code}"
         }
 
-    data = response.json()
-
-    tweets = data.get("data", [])
-
-    meta = data.get("meta", {})
-
+    tweets, meta = parse_x_page(response.json())
     next_token = meta.get("next_token")
-    print(
-    f"@{username} | "
-    f"token_entrada={pagination_token[:20] if pagination_token else None} | "
-    f"token_salida={next_token[:20] if next_token else None} | "
-    f"tweets={len(tweets)}")
-    
+
     if (pagination_token and next_token and pagination_token == next_token):
         return {
             "ok": False,
             "rate_limit": False,
-            "reset_since_id": False,
-            "tweets": [],
-            "next_token": pagination_token,
-            "error": "X devolvió el mismo pagination_token. Se detuvo para evitar un ciclo infinito."
+            "reset_pagination": True,
         }
 
     return {
@@ -566,11 +549,7 @@ def get_users(limit=1):
         raise
 
     finally:
-        if cur:
-            cur.close()
-
-        if conn:
-            conn.close()
+        close_job_connection(conn, cur, None, False)
 
 
 def update_all():
@@ -611,10 +590,11 @@ def update_all():
 
 # ================== CLOUD RUN HANDLER ==================
 
-@app.route("/ingest", methods=["GET"])
+@app.route("/ingest", methods=["POST"])
 def ingest_handler():
     conn = None
     cur = None
+    acquired = False
 
     try:
         conn = get_db_connection()
@@ -626,7 +606,8 @@ def ingest_handler():
 
         lock_result = cur.fetchone()
 
-        if not lock_result or lock_result["acquired"] != 1:
+        acquired = bool(lock_result and lock_result["acquired"] == 1)
+        if not acquired:
             return jsonify({
                 "ok": True,
                 "busy": True,
@@ -674,6 +655,11 @@ def ingest_handler():
                     "error": resultado.get("error")
                 }), 429
 
+            if resultado.get("reset_pagination"):
+                update_pagination_token(cur, user_id, None)
+                conn.commit()
+                return jsonify({"ok": False, "retry": True, "user": username}), 502
+
             if resultado.get("reset_since_id"):
 
                 cur.execute(
@@ -704,7 +690,7 @@ def ingest_handler():
                 "ok": False,
                 "user": username,
                 "error": resultado.get("error")
-            }), 500
+            }), 502
 
         tweets = resultado["tweets"]
         next_token = resultado["next_token"]
@@ -712,31 +698,10 @@ def ingest_handler():
         guardados = 0
 
         # ----------------------------------------
-        # GUARDAR TWEETS DE ESTA PÁGINA
-        # ----------------------------------------
-
-        errores_tweets = 0
-
+        # Confirmar las escrituras y el avance de página en la misma transacción.
         for tweet in tweets:
+            guardados += insert_or_update_tweet(cur, tweet, user_id)
 
-            try:
-                nuevo = insert_or_update_tweet(
-                    cur,
-                    tweet,
-                    user_id
-                )
-
-                guardados += nuevo
-
-            except Exception as e:
-                errores_tweets += 1
-
-                print(
-                    f"❌ Error procesando tweet "
-                    f"{tweet.get('id')}: {e}"
-                )
-
-        # ----------------------------------------
         # TODAVÍA QUEDAN MÁS PÁGINAS
         # ----------------------------------------
 
@@ -750,7 +715,6 @@ def ingest_handler():
                 "ok": True,
                 "user": username,
                 "tweets_recibidos": len(tweets),
-                "tweets_con_error": errores_tweets,
                 "tweets_guardados": guardados,
                 "pagination_pending": True,
                 "message": "Página guardada. La cuenta continuará en la siguiente ejecución."
@@ -787,65 +751,48 @@ def ingest_handler():
             "user": username,
             "tweets_recibidos": len(tweets),
             "tweets_guardados": guardados,
-            "tweets_con_error": errores_tweets,
             "pagination_pending": False,
             "last_tweetid": nuevo_last_tweetid,
             "message": "Cuenta procesada completamente."
         }), 200
 
-    except Exception as e:
+    except Exception:
+        if conn is not None:
+            rollback_job(conn)
 
-        if conn:
-            conn.rollback()
-
-        print(f"❌ Error ingest: {e}")
+        app.logger.exception("Falló la ingesta de tweets")
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": "Falló el trabajo"
         }), 500
 
     finally:
+        close_job_connection(conn, cur, "netvora_tweet_ingest", acquired)
 
-        if cur and conn:
-            try:
-                cur.execute(
-                    "SELECT RELEASE_LOCK('netvora_tweet_ingest')"
-                )
-            except Exception:
-                pass
-
-        if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
-
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 @app.route("/test", methods=["GET"])
 def health():
+    conn = None
     try:
         conn = get_db_connection()
         if conn.is_connected():
             return "OK - DB Connected", 200
         return "DB Not Connected", 500
 
-    except Exception as e:
-        return f"DB Error: {e}", 500
+    except Exception:
+        app.logger.exception("Falló la comprobación de MySQL")
+        return "DB Not Connected", 500
 
     finally:
         try:
-            conn.close()
-        except:
-            pass
+            if conn is not None:
+                conn.close()
+        except Exception:
+            app.logger.warning("Fallo cerrando conexión MySQL", exc_info=True)
 
 
-@app.route("/reprocess", methods=["GET"])
+@app.route("/reprocess", methods=["POST"])
 def reprocess_handler():
     try:
         resultado = reprocess_pending_tweets(limit=100)
@@ -854,12 +801,12 @@ def reprocess_handler():
 
         return jsonify(resultado), status_code
 
-    except Exception as e:
-        print(f"❌ Error en /reprocess: {e}")
+    except Exception:
+        app.logger.exception("Fallo en /reprocess")
 
         return jsonify({
             "ok": False,
-            "error": str(e)
+            "error": "Falló el trabajo"
         }), 500
 
 @app.route("/", methods=["GET"])
@@ -870,11 +817,15 @@ def status():
 
 @app.route("/predict", methods=["GET"])
 def predict():
-    texto = "Me encanta"
-    print(MLModel.predecir_categoria(texto)[0])
-    print(MLModel.get_sentiment(texto)[0])
-    
-    
+    texto = request.args.get("text", "").strip()
+    if not texto:
+        return jsonify({"error": "Falta el parámetro text"}), 400
+    return jsonify({
+        "categoria": str(MLModel.predecir_categoria(texto)[0]),
+        "sentimiento": str(MLModel.get_sentiment(texto)[0]),
+    })
+
+
 # ================== REPLIES INGEST ==================
 
 def get_state(cursor, key: str, default=None):
@@ -904,26 +855,28 @@ def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
         (hours_back, cap),
     )
     return set(str(r[0]) for r in cursor.fetchall())
-def fetch_recent_root_tweets(cursor,hours_back: int = 48,cap: int = 5000):
-    cursor.execute(
-        """
+def fetch_recent_root_tweets(cursor, cap=5, after_id=None, root_id=None):
+    query = """
         SELECT
             t.tweetid,
             t.created,
             t.TweetUser_idTweetUser,
             tu.TweetUser
         FROM Tweets t
-        JOIN TweetUser tu
-            ON tu.idTweetUser = t.TweetUser_idTweetUser
-        WHERE t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL %s HOUR
-        ORDER BY t.created ASC, t.tweetid ASC
-        LIMIT %s
-        """,
-        (
-            hours_back,
-            cap
-        )
-    )
+        JOIN TweetUser tu ON tu.idTweetUser = t.TweetUser_idTweetUser
+        WHERE t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL 48 HOUR
+    """
+    params = []
+    if root_id is not None:
+        query += " AND t.tweetid = %s"
+        params.append(root_id)
+    elif after_id is not None:
+        query += " AND t.tweetid > %s"
+        params.append(after_id)
+
+    query += " ORDER BY t.tweetid ASC LIMIT %s"
+    params.append(cap)
+    cursor.execute(query, tuple(params))
 
     rows = cursor.fetchall()
 
@@ -946,11 +899,11 @@ def insert_reply(cursor, root_tweetid: str, reply: dict):
 
     if created_at:
         try:
-            created_dt = created_dt = (
-    datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    .astimezone(BOLIVIA_TZ)
-    .replace(tzinfo=None)
-)
+            created_dt = (
+                datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                .astimezone(BOLIVIA_TZ)
+                .replace(tzinfo=None)
+            )
         except Exception:
             created_dt = None
 
@@ -1023,7 +976,7 @@ def x_search_replies_to_username(username: str, since_id: str | None, next_token
         if next_token:
             params["next_token"] = next_token
 
-        return requests.get(url, headers=headers, params=params, timeout=20)
+        return requests.get(url, headers=x_headers(), params=params, timeout=20)
 
     r = do_request(use_since=True)
 
@@ -1069,7 +1022,7 @@ def x_search_conversation(root_tweetid: str,since_id: str | None,next_token: str
         params["next_token"] = next_token
 
     try:
-        r = requests.get(url,headers=headers,params=params,timeout=20)
+        r = requests.get(url,headers=x_headers(),params=params,timeout=20)
 
     except requests.RequestException as e:
         return {
@@ -1086,18 +1039,12 @@ def x_search_conversation(root_tweetid: str,since_id: str | None,next_token: str
             "body": r.text
         }
 
-    if r.status_code == 400 and since_id:
+    if r.status_code == 400:
         body_text = r.text or ""
-
-        if (
-            "since_id" in body_text
-            and "must be a tweet id created after" in body_text
-        ):
-            return {
-                "since_id_expired": True,
-                "status": 400,
-                "body": body_text
-            }
+        if since_id and "since_id" in body_text and "must be a tweet id created after" in body_text:
+            return {"since_id_expired": True}
+        if next_token and invalid_x_pagination(body_text):
+            return {"pagination_expired": True}
 
     if r.status_code != 200:
         return {
@@ -1108,20 +1055,20 @@ def x_search_conversation(root_tweetid: str,since_id: str | None,next_token: str
 
     return r.json()
 
-@app.route("/ingest_replies", methods=["GET"])
+@app.route("/ingest_replies", methods=["POST"])
 def ingest_replies_handler():
     """
     Extrae replies NUEVOS dirigidos a tus cuentas,
     y guarda solo los que pertenecen a tweets (root) de las últimas 48h.
     Diseñado para corridas frecuentes (cada 5-10 min) y para no reventar rate limits.
     """
-    start_time = time.time()
+    start_time = time.monotonic()
     MAX_RUNTIME_SECONDS = 40
     conn = None
     cursor = None
+    acquired = False
     try:
         conn = get_db_connection()
-        conn.autocommit = True
         cursor = conn.cursor()
         cursor.execute(
         "SELECT GET_LOCK('netvora_replies_ingest', 0)"
@@ -1129,7 +1076,8 @@ def ingest_replies_handler():
 
         lock_result = cursor.fetchone()
 
-        if not lock_result or lock_result[0] != 1:
+        acquired = bool(lock_result and lock_result[0] == 1)
+        if not acquired:
             return jsonify({
                 "ok": True,
                 "busy": True,
@@ -1137,7 +1085,6 @@ def ingest_replies_handler():
             }), 200
 
         
-        root_tweets = fetch_recent_root_tweets(cursor,hours_back=48,cap=5000)
         cursor.execute("""
             DELETE s
             FROM ingest_state s
@@ -1156,104 +1103,42 @@ def ingest_replies_handler():
             WHERE k LIKE 'replies_pagination_token:%'
             AND v IS NOT NULL
             AND v <> ''
+            ORDER BY k
             LIMIT 1
         """)
 
         pending_row = cursor.fetchone()
-
-        pending_root_id = None
-
+        selected = []
         if pending_row:
             pending_root_id = pending_row[0].split(":")[-1]
-            
-        # Si el root pendiente ya salió de la ventana de 48 horas,
-        # limpiamos su estado para no intentar retomarlo eternamente.
-        if pending_root_id:
+            selected = fetch_recent_root_tweets(cursor, cap=1, root_id=pending_root_id)
+            if not selected:
+                set_state(cursor, f"replies_pagination_token:{pending_root_id}", "")
+                set_state(cursor, f"replies_max_seen:{pending_root_id}", "")
 
-            root_exists = any(
-                str(root["tweetid"]) == str(pending_root_id)
-                for root in root_tweets
-            )
+        if not selected:
+            last_root_id = get_state(cursor, "replies_last_root_id")
+            selected = fetch_recent_root_tweets(cursor, after_id=last_root_id)
+            if not selected and last_root_id is not None:
+                selected = fetch_recent_root_tweets(cursor)
 
-            if not root_exists:
-
-                set_state(
-                    cursor,
-                    f"replies_pagination_token:{pending_root_id}",
-                    ""
-                )
-
-                set_state(
-                    cursor,
-                    f"replies_max_seen:{pending_root_id}",
-                    ""
-                )
-
-                pending_root_id = None
-            
-        
-        
-
-        if not root_tweets:
-            
+        conn.commit()
+        if not selected:
             return jsonify({
                 "ok": True,
-                "msg": "No hay tweets root recientes para procesar"
+                "msg": "No hay tweets root recientes para procesar",
             }), 200
-
-
-        # 3) Procesar pocos tweets por ejecución
-        batch_size = 5
-
-        last_root_id = get_state(cursor,"replies_last_root_id",None)
-
-        selected = []
-
-        # 1) Si hay una conversación con paginación pendiente,
-        # la procesamos primero y sola.
-        if pending_root_id:
-
-            pending_root = next((root for root in root_tweets if str(root["tweetid"]) == str(pending_root_id)),None)
-
-            if pending_root:
-                selected.append(pending_root)
-
-        # 2) Si no hay paginación pendiente,
-        # seleccionamos varios roots consecutivos.
-        if not selected:
-
-            if last_root_id:
-                next_index = 0
-
-                for i, root in enumerate(root_tweets):
-                    if int(root["tweetid"]) > int(last_root_id):
-                        next_index = i
-                        break
-                else:
-                    next_index = 0
-
-            else:
-                next_index = 0
-
-            for i in range(batch_size):
-                idx = next_index + i
-
-                if idx >= len(root_tweets):
-                    break
-
-                selected.append(
-                    root_tweets[idx]
-                )
 
         saved = 0
         rate_limited = False
+        upstream_failed = False
         details = []
         completed_roots = []
         fetched_replies = 0
         pages_fetched = 0
 
         for root in selected:
-            if time.time() - start_time >= MAX_RUNTIME_SECONDS:
+            if time.monotonic() - start_time >= MAX_RUNTIME_SECONDS:
                 details.append({
                     "type": "runtime_limit",
                     "message": "Se alcanzó el límite interno de tiempo."
@@ -1268,195 +1153,122 @@ def ingest_replies_handler():
             pagination_key = f"replies_pagination_token:{root_tweetid}"
             max_seen_key = f"replies_max_seen:{root_tweetid}"
 
-            since_id = get_state(cursor,since_key,None)
+            since_id = get_state(cursor, since_key)
+            next_token = get_state(cursor, pagination_key)
+            max_seen = get_state(cursor, max_seen_key)
+            data = x_search_conversation(root_tweetid, since_id, next_token)
 
-            next_token = get_state(cursor,pagination_key,None)
-
-            max_seen_global = get_state(cursor,max_seen_key,None)
-            processing_failed = False
-            
-            for page in range(1):
-                data = x_search_conversation(root_tweetid,since_id,next_token)
-
-                if isinstance(data, dict) and data.get("since_id_expired"):
-                    print(f"⚠️ since_id expirado para {uname}: {since_id}")
-
+            if data.get("since_id_expired") or data.get("pagination_expired"):
+                if data.get("since_id_expired"):
                     set_state(cursor, since_key, "")
-                    set_state(cursor, pagination_key, "")
-                    set_state(cursor, max_seen_key, "")
-
-                    since_id = None
-                    next_token = None
-                    max_seen_global = None
-
-                    data = x_search_conversation(root_tweetid,None,None)
-
-                if isinstance(data, dict) and data.get("rate_limited"):
-                    rate_limited = True
-                    processing_failed = True
-                    details.append({
-                        "user": uname,
-                        "root_tweetid": root_tweetid,
-                        "rate_limited": True,
-                        "retry_after": data.get("retry_after")
-                    })
-                    break
-
-                if isinstance(data, dict) and data.get("error"):
-                    processing_failed = True
-                    details.append({
-                        "user": uname,
-                        "root_tweetid": root_tweetid,
-                        "error": True,
-                        "status": data.get("status"),
-                        "body": data.get("body")
-                    })
-                    break
-
-                tweets = data.get("data", []) if isinstance(data, dict) else []
-                meta = data.get("meta", {}) if isinstance(data, dict) else {}
-                pages_fetched += 1
-                fetched_replies += len(tweets)
-
-                response_next_token = meta.get("next_token")
-
-                if not tweets:
-
-                    # Si X todavía entrega otra página, guardamos ese token.
-                    if response_next_token:
-
-                        set_state( cursor,pagination_key,response_next_token)
-
-                        next_token = response_next_token
-
-                    else:
-                        if max_seen_global not in (None, ""):
-                            set_state(cursor,since_key,str(max_seen_global))
-
-                        set_state(cursor,pagination_key,"")
-                        set_state(cursor,max_seen_key,"")
-                        next_token = None
-
-                    break
-
-                for tw in tweets:
-                    conv_id = str(tw.get("conversation_id") or "")
-
-                    if conv_id == root_tweetid:
-
-                        nuevo = insert_reply(cursor,root_tweetid,tw)
-                        saved += nuevo
-
-                    tid = str(tw["id"])
-
-                    if max_seen_global in (None, ""):
-                        max_seen_global = tid
-                    elif int(tid) > int(max_seen_global):
-                        max_seen_global = tid
-
-
-                # Guardamos el mayor tweet ID encontrado hasta ahora
-                if max_seen_global not in (None, ""):
-                    set_state(cursor,max_seen_key,str(max_seen_global))
-
-
-                meta = data.get("meta", {})
-                next_token = meta.get("next_token")
-
-
-                # ----------------------------------------
-                # TODAVÍA QUEDAN MÁS PÁGINAS
-                # ----------------------------------------
-                if next_token:
-                    set_state(cursor,pagination_key,next_token)
-
-                    continue
-
-
-                # ----------------------------------------
-                # YA TERMINAMOS TODAS LAS PÁGINAS
-                # ----------------------------------------
-
-                if max_seen_global not in (None, ""):
-                    set_state(cursor,since_key,str(max_seen_global))
-
-                # Limpiamos estados temporales
+                # Reiniciar desde el último since_id confirmado y reprocesar duplicados.
                 set_state(cursor, pagination_key, "")
                 set_state(cursor, max_seen_key, "")
-
-                break
-            
-            pagination_pending = get_state(cursor,f"replies_pagination_token:{root_tweetid}",None)
-
-            # Si este root falló, no avanzamos el cursor
-            # y tampoco procesamos los siguientes roots del batch.
-            if processing_failed:
+                conn.commit()
+                details.append({"root_tweetid": root_tweetid, "pagination_reset": True})
+                upstream_failed = True
                 break
 
-            # Si todavía tiene páginas pendientes,
-            # dejamos el cursor antes de este root para continuarlo
-            # en la próxima ejecución.
-            if pagination_pending:
+            if data.get("rate_limited"):
+                rate_limited = True
+                details.append({
+                    "user": uname,
+                    "root_tweetid": root_tweetid,
+                    "rate_limited": True,
+                    "retry_after": data.get("retry_after"),
+                })
                 break
 
-            # Root completamente terminado:
-            # avanzamos el cursor hasta este tweet.
-            set_state(cursor,"replies_last_root_id",str(root_tweetid))
+            if data.get("error"):
+                upstream_failed = True
+                details.append({
+                    "user": uname,
+                    "root_tweetid": root_tweetid,
+                    "error": True,
+                    "status": data.get("status"),
+                })
+                break
+
+            tweets, meta = parse_x_page(data)
+            response_next_token = meta.get("next_token")
+            if next_token and response_next_token == next_token:
+                set_state(cursor, pagination_key, "")
+                set_state(cursor, max_seen_key, "")
+                conn.commit()
+                upstream_failed = True
+                details.append({"root_tweetid": root_tweetid, "error": "Token de paginación repetido"})
+                break
+
+            pages_fetched += 1
+            fetched_replies += len(tweets)
+
+            for reply in tweets:
+                if str(reply.get("conversation_id")) != root_tweetid:
+                    raise ValueError(f"Respuesta fuera de la conversación {root_tweetid}")
+                saved += insert_reply(cursor, root_tweetid, reply)
+                if not max_seen or int(reply["id"]) > int(max_seen):
+                    max_seen = str(reply["id"])
+
+            if response_next_token:
+                set_state(cursor, pagination_key, response_next_token)
+                if max_seen:
+                    set_state(cursor, max_seen_key, max_seen)
+                conn.commit()
+                break
+
+            if max_seen:
+                set_state(cursor, since_key, max_seen)
+            set_state(cursor, pagination_key, "")
+            set_state(cursor, max_seen_key, "")
+            set_state(cursor, "replies_last_root_id", root_tweetid)
+            conn.commit()
             completed_roots.append(root_tweetid)
-        
 
-
-        conn.commit()
+        status_code = 429 if rate_limited else 502 if upstream_failed else 200
         return jsonify({
-            "ok": True,
+            "ok": status_code == 200,
             "saved": saved,
             "roots_processed": completed_roots,
             "rate_limited": rate_limited,
             "details": details,
             "fetched_replies": fetched_replies,
             "pages_fetched": pages_fetched,
-            "elapsed_seconds": round(time.time() - start_time, 2),
-        }), 200
+            "elapsed_seconds": round(time.monotonic() - start_time, 2),
+        }), status_code
 
-    except Error as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    except Exception:
+        if conn is not None:
+            rollback_job(conn)
+        app.logger.exception("Fallo en la ingesta de respuestas")
+        return jsonify({"ok": False, "error": "Falló la ingesta de respuestas"}), 500
     finally:
-        if cursor and conn:
-            try:
-                cursor.execute(
-                    "SELECT RELEASE_LOCK('netvora_replies_ingest')"
-                )
-            except Exception:
-                pass
-        try:
-            cursor.close()
-            conn.close()
-        except Exception:
-            pass
+        close_job_connection(conn, cursor, "netvora_replies_ingest", acquired)
 
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    secret = os.getenv("CONSUMER_SECRET_KEY")
+    if not secret:
+        return jsonify({"error": "Webhook sin configurar"}), 503
+
     if request.method == "GET":
         crc_token = request.args.get("crc_token")
+        if not crc_token:
+            return jsonify({"error": "Falta crc_token"}), 400
+        payload = crc_token.encode()
+    else:
+        payload = request.get_data()
 
-        hash_digest = hmac.new(
-            CONSUMER_SECRET_KEY.encode(),
-            msg=crc_token.encode(),
-            digestmod=hashlib.sha256
-        ).digest()
+    digest = hmac.digest(secret.encode(), payload, "sha256")
+    signature = "sha256=" + base64.b64encode(digest).decode()
+    if request.method == "GET":
+        return jsonify({"response_token": signature})
 
-        response_token = "sha256=" + base64.b64encode(hash_digest).decode()
+    received = request.headers.get("X-Twitter-Webhooks-Signature", "")
+    if not hmac.compare_digest(received.encode(), signature.encode()):
+        return jsonify({"error": "Firma inválida"}), 401
+    return "OK", 200
 
-        return jsonify({"response_token": response_token})
-
-    if request.method == "POST":
-        print(request.json)  # aquí llegan los eventos
-        return "OK", 200
-    
-    
 
 def ejecutar_job_stance(lock_name, tarea):
     conn = None
@@ -1481,45 +1293,25 @@ def ejecutar_job_stance(lock_name, tarea):
             }), 200
 
         resultado = tarea()
-
+        failed = (
+            resultado.get("fallidos", 0)
+            if "fallidos" in resultado
+            else sum(resumen["fallidos"] for resumen in resultado.values())
+        )
         return jsonify({
-            "ok": True,
-            "resultado": resultado
-        }), 200
+            "ok": failed == 0,
+            "resultado": resultado,
+        }), 502 if failed else 200
 
-    except Exception as e:
+    except Exception:
         app.logger.exception("Fallo en job Stance: %s", lock_name)
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
+        return jsonify({"ok": False, "error": "Falló el trabajo de Stance"}), 500
 
     finally:
-        if cur is not None:
-            if adquirido:
-                try:
-                    cur.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
-                    cur.fetchone()  # Consumir SELECT antes de cerrar el cursor.
-                except Exception as cleanup_error:
-                    app.logger.warning(
-                        "No se pudo liberar el lock %s: %s", lock_name, cleanup_error
-                    )
-            try:
-                cur.close()
-            except Exception as cleanup_error:
-                app.logger.warning(
-                    "Error cerrando cursor de Stance: %s", cleanup_error
-                )
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception as cleanup_error:
-                app.logger.warning(
-                    "Error cerrando conexión de Stance: %s", cleanup_error
-                )
+        close_job_connection(conn, cur, lock_name, adquirido)
 
 
-@app.route("/stance/posts", methods=["GET"])
+@app.route("/stance/posts", methods=["POST"])
 def ejecutar_stance_posts_handler():
     # Procesa pendientes entre todas las publicaciones almacenadas,
     # sin token propio ni filtro por fecha. Las tandas pequeñas evitan timeout.
@@ -1533,7 +1325,7 @@ def ejecutar_stance_posts_handler():
     )
 
 
-@app.route("/stance/topics", methods=["GET"])
+@app.route("/stance/topics", methods=["POST"])
 def ejecutar_stance_topics_handler():
     # Primero calcula los targets de topicos que aún no los tengan.
     # Después clasifica comentarios pendientes por topico, sin filtro de fecha.
@@ -1561,7 +1353,7 @@ def ejecutar_stance_topics_handler():
     )
 
 
-@app.route("/selectTopics", methods=["GET"])
+@app.route("/selectTopics", methods=["POST"])
 def select_topics():
     try:
         df_no_asignados , df_asignados = classify_tweets()
@@ -1571,18 +1363,20 @@ def select_topics():
             "tweets_asignados": len(df_asignados),
             
         }), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    except Exception:
+        app.logger.exception("Falló el trabajo de tópicos")
+        return jsonify({"ok": False, "error": "Falló el trabajo de tópicos"}), 500
     
-@app.route("/create_topics", methods=["GET"])
+@app.route("/create_topics", methods=["POST"])
 def create_topics():
     try:  
         a = insertar_nuevos_topicos(aplicar_cambios=True)
         if a is None:
             return jsonify({"ok": True, "msg": "No hay topics para nombrar."}), 200
         return jsonify({"ok": True}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    except Exception:
+        app.logger.exception("Falló el trabajo de tópicos")
+        return jsonify({"ok": False, "error": "Falló el trabajo de tópicos"}), 500
 
 if __name__ == "__main__":
     # Para correrlo localmente

@@ -1,4 +1,3 @@
-import nltk
 
 #nltk.download('all')
 
@@ -169,6 +168,6 @@ print(confusion_matrix(y_test, y_pred))
 import joblib
 
 # Save the model
-joblib.dump(svm_pipeline, 'svm_category_classifier.joblib')
+joblib.dump(svm_pipeline, 'model/svm_category_classifier2.joblib')
 
-print("Model saved as svm_category_classifier.joblib")
+print("Model saved as model/svm_category_classifier2.joblib")

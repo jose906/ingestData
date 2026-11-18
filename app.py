@@ -31,7 +31,7 @@ try:
             default=str
         ), flush=True)
 
-        print("[STANCE] Trabajo finalizado", flush=True)
+        sys.exit(1 if resultado.get("fallidos", 0) else 0)
 
 except Exception:
     print("[STANCE ERROR] Falló la ejecución", flush=True)

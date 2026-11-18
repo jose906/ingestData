@@ -1,17 +1,28 @@
-# worker_replies.py
-# job_main.py
 import os
-import sys
-from main import run_ingest_users, run_ingest_replies  # vas a crear estas funciones “core”
+
+from main import app, ingest_handler, ingest_replies_handler
+
+
+def main():
+    jobs = {
+        "ingest": (ingest_handler,),
+        "replies": (ingest_replies_handler,),
+        "both": (ingest_handler, ingest_replies_handler),
+    }
+    mode = os.getenv("JOB_MODE", "ingest")
+    if mode not in jobs:
+        app.logger.error("JOB_MODE inválido: %s", mode)
+        return 2
+
+    failed = False
+    with app.app_context():
+        for job in jobs[mode]:
+            _, status = job()
+            if status >= 400:
+                app.logger.error("%s falló con estado %s", job.__name__, status)
+                failed = True
+    return int(failed)
+
 
 if __name__ == "__main__":
-    mode = os.environ.get("JOB_MODE", "ingest")  # ingest | replies | both
-    try:
-        if mode in ("ingest", "both"):
-            run_ingest_users()
-        if mode in ("replies", "both"):
-            run_ingest_replies()
-        sys.exit(0)
-    except Exception as e:
-        print("JOB ERROR:", str(e))
-        sys.exit(1)
+    raise SystemExit(main())

@@ -1,11 +1,10 @@
+from pathlib import Path
+
 import joblib
 import numpy as np
-#import spacy
-# Load the model
-svm_pipeline = joblib.load('model/svm_category_classifier2.joblib')
-svm_sentiment_model = joblib.load('model/svm_sentiment_classifier2.joblib')
-#nlp = spacy.load("es_core_news_lg")
-print("Model loaded successfully.")
+MODEL_DIR = Path(__file__).resolve().parent / "model"
+svm_pipeline = joblib.load(MODEL_DIR / "svm_category_classifier2.joblib")
+svm_sentiment_model = joblib.load(MODEL_DIR / "svm_sentiment_classifier2.joblib")
 
 def predecir_categoria(texto: str, modelo=svm_pipeline, umbral=0.30):
     """

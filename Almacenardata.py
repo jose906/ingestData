@@ -1,59 +1,31 @@
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import os
-from datetime import datetime, timedelta, timezone
+
 import requests
-import mysql.connector
 from mysql.connector import Error
+
+from database import get_db_connection
 import MLModel
 
-# ================== CONFIG BD ==================
-DB_CONFIG = {
-    
-     "host": "34.69.57.221",      # o la IP de tu contenedor / Cloud SQL
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
-    "port": 3306,
-    
-}
-
-# ================== CONFIG TWITTER ==================
-TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAAN9WpgEAAAAAHarp9HjcuJFZ4wtx1DtpsP8Z93A%3DC3AEHMO2YXaGFFgblPEdkYTGhBne75WLUlG5Mc95FGKlR003vg'
-
-# o tu token fijo mientras pruebas:
-# TWITTER_BEARER_TOKEN = "AAAAAAAA..."
-
-headers = {
-    "Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"
-}
-
-# ================== FUNCIÓN PRINCIPAL ==================
-
-from datetime import datetime, timedelta, timezone
-import mysql.connector
-from mysql.connector import Error
-import requests
-import MLModel
 
 def get_last_created_from_db():
     """
     Devuelve el último datetime (MAX(created)) de la tabla Tweets.
-    Si la BD está vacía o hay error, devuelve None.
+    Si la BD está vacía, devuelve None.
     """
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        cursor.execute("SELECT MAX(created) FROM Tweets")
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        with closing(get_db_connection()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute("SELECT MAX(created) FROM Tweets")
+            row = cursor.fetchone()
 
         if row and row[0]:
-            return row[0]  # datetime de MySQL (naive, asumimos UTC)
+            return row[0]
         return None
 
     except Error as e:
         print(f"Error al consultar última fecha en MySQL: {e}")
-        return None
+        raise
 
 
 def getTweets():
@@ -77,12 +49,9 @@ def getTweets():
     last_created_db = get_last_created_from_db()
 
     if last_created_db:
-        # Asumimos que 'created' en MySQL está en UTC (sin tz),
-        # así que le ponemos tzinfo=UTC explícitamente.
-        start_dt_utc = last_created_db.replace(tzinfo=timezone.utc)
-        print(f"Último tweet en BD con created = {last_created_db} (UTC asumido)")
+        start_dt_utc = last_created_db.replace(tzinfo=BOLIVIA_TZ).astimezone(timezone.utc)
     else:
-        # Si la BD está vacía o hubo error, usamos últimos 5 días (como antes)
+        # Si la BD está vacía, usamos los últimos 5 días
         start_5d_bo = (now_bolivia - timedelta(days=5)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
@@ -112,8 +81,13 @@ def getTweets():
     all_tweets = []
 
     # ====== DESCARGAR TODOS LOS TWEETS PAGINANDO ======
+    token = os.getenv("TWITTER_BEARER_TOKEN")
+    if not token:
+        raise RuntimeError("Falta TWITTER_BEARER_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"}
+    seen_tokens = set()
     while True:
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
 
         if resp.status_code != 200:
             raise Exception(f"Error Twitter API: {resp.status_code} - {resp.text}")
@@ -140,6 +114,9 @@ def getTweets():
             break
 
         # Agregar token de paginación para la siguiente vuelta
+        if next_token in seen_tokens:
+            raise RuntimeError("X devolvió un token de paginación repetido")
+        seen_tokens.add(next_token)
         params['pagination_token'] = next_token
 
     # ====== GUARDAR EN LA BASE DE DATOS ======
@@ -147,8 +124,10 @@ def getTweets():
         print("No se encontraron tweets nuevos desde la última fecha registrada.")
         return []
 
+    conn = None
+    cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         # Insert para TweetUser
@@ -183,8 +162,11 @@ def getTweets():
             author_id = int(t.get('author_id'))
             username = t.get('username')
 
-            # Parsear fecha ISO de Twitter a DATETIME (UTC) para MySQL
-            created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+            created_at = (
+                datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                .astimezone(BOLIVIA_TZ)
+                .replace(tzinfo=None)
+            )
 
             # URL del tweet (si tenemos username)
             if username:
@@ -229,25 +211,23 @@ def getTweets():
         raise
     finally:
         try:
-            cursor.close()
-            conn.close()
-        except:
-            pass
+            if cursor is not None:
+                cursor.close()
+        finally:
+            if conn is not None:
+                conn.close()
 
     return all_tweets
 
 def get_user_ids_from_db():
     """
     Devuelve una lista de IDs de usuario (strings) desde la tabla TweetUser.idTweetUser.
-    Si hay error o tabla vacía, devuelve lista vacía.
+    Si la tabla está vacía, devuelve una lista vacía.
     """
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        cursor.execute("SELECT idTweetUser FROM TweetUser")
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        with closing(get_db_connection()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute("SELECT idTweetUser FROM TweetUser")
+            rows = cursor.fetchall()
 
         # rows es una lista de tuplas, ej: [(65444625,), (94438031,), ...]
         user_ids = [str(r[0]) for r in rows]
@@ -257,6 +237,6 @@ def get_user_ids_from_db():
 
     except Error as e:
         print(f"Error al consultar usuarios en MySQL: {e}")
-        return []
+        raise
 
 

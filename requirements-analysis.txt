@@ -1,0 +1,6 @@
+-r requirements.txt
+hdbscan
+nltk
+openpyxl
+sentence-transformers
+umap-learn

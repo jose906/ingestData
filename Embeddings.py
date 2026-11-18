@@ -1,6 +1,6 @@
-import re
+from contextlib import closing
+from database import get_db_connection
 import json
-import mysql.connector
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -8,7 +8,6 @@ from collections import Counter
 import umap
 import hdbscan
 import helper
-import numpy as np
 
 
 
@@ -16,13 +15,6 @@ import numpy as np
 UMBRAL = 0.8
 
 
-DB_CONFIG = {
-    "host": "34.69.57.221",
-    "user": "admin",
-    "password": "Admin123!",
-    "database": "Analisis",
-    "port": 3306,
-}
 
 TOPICS_ESPECIALES = [
     "__SOLO_LINK__",
@@ -34,25 +26,16 @@ TOPICS_ESPECIALES = [
     "__RESUMEN__"
 ]
 
-def get_db_connection():
-    return mysql.connector.connect(**DB_CONFIG)
-
-
 
 def get_topic_embeddings():
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
-
-    query = """
-        SELECT topic_id, embedding_vector
-        FROM topic_embeddings
-        ORDER BY topic_id
-    """
-    cursor.execute(query)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        query = """
+            SELECT topic_id, embedding_vector
+            FROM topic_embeddings
+            ORDER BY topic_id
+        """
+        cursor.execute(query)
+        results = cursor.fetchall()
 
     topics = []
 
@@ -66,28 +49,23 @@ def get_topic_embeddings():
 
 
 def get_tweet_embedding():
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        query = """
+            SELECT
+                t.tweetid,
+                t.text,
+                e.embedding_vector
+            FROM Tweets t
+            JOIN tweet_embeddings e
+                ON t.tweetid = e.tweetid
+            LEFT JOIN topic_tweets tt
+                ON t.tweetid = tt.tweetid
+            WHERE tt.tweetid IS NULL
+              AND t.created >= NOW() - INTERVAL 14 DAY
+        """
 
-    query = """
-        SELECT
-            t.tweetid,
-            t.text,
-            e.embedding_vector
-        FROM Tweets t
-        JOIN tweet_embeddings e
-            ON t.tweetid = e.tweetid
-        LEFT JOIN topic_tweets tt
-            ON t.tweetid = tt.tweetid
-        WHERE tt.tweetid IS NULL
-          AND t.created >= NOW() - INTERVAL 14 DAY
-    """
-
-    cursor.execute(query)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+        cursor.execute(query)
+        results = cursor.fetchall()
 
     tweets = []
 
@@ -102,22 +80,17 @@ def get_tweet_embedding():
 
 def get_especial_topics():
 
-    connection = get_db_connection()
-    cursor = connection.cursor(dictionary=True)
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
 
-    placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
+        query = f"""
+            SELECT topic_id, topic_name
+            FROM topics
+            WHERE topic_name IN ({placeholders})
+        """
 
-    query = f"""
-        SELECT topic_id, topic_name
-        FROM topics
-        WHERE topic_name IN ({placeholders})
-    """
-
-    cursor.execute(query, TOPICS_ESPECIALES)
-    results = cursor.fetchall()
-
-    cursor.close()
-    connection.close()
+        cursor.execute(query, TOPICS_ESPECIALES)
+        results = cursor.fetchall()
 
     topicos = {}
 
@@ -134,48 +107,43 @@ def insert_tweets_topic(df):
 
 
 
-    connection = get_db_connection()
-    cursor = connection.cursor()
+    with closing(get_db_connection()) as connection, closing(connection.cursor()) as cursor:
+        insert_query = """
+            INSERT INTO topic_tweets
+                (topic_id, tweetid, similarity, assigned_at)
+            VALUES
+                (%s, %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                similarity = VALUES(similarity),
+                assigned_at = NOW()
+        """
 
-    insert_query = """
-        INSERT INTO topic_tweets
-            (topic_id, tweetid, similarity, assigned_at)
-        VALUES
-            (%s, %s, %s, NOW())
-        ON DUPLICATE KEY UPDATE
-            similarity = VALUES(similarity),
-            assigned_at = NOW()
-    """
+        tweets_topic = df.to_dict(orient="records")
+        data_to_insert = [
+            (item["topic_id"], item["tweetid"], item["similarity"])
+            for item in tweets_topic
+        ]
 
-    tweets_topic = df.to_dict(orient="records")
-    data_to_insert = [
-        (item["topic_id"], item["tweetid"], item["similarity"])
-        for item in tweets_topic
-    ]
+        cursor.executemany(insert_query, data_to_insert)
 
-    cursor.executemany(insert_query, data_to_insert)
+        conteo_topics = Counter(item["topic_id"] for item in tweets_topic)
 
-    conteo_topics = Counter(item["topic_id"] for item in tweets_topic)
+        update_query = """
+            UPDATE topics
+            SET
+                total_tweets = (SELECT COUNT(*) FROM topic_tweets tt WHERE tt.topic_id = topics.topic_id),
+                last_seen = NOW()
+            WHERE topic_id = %s
+        """
 
-    update_query = """
-        UPDATE topics
-        SET
-            total_tweets = total_tweets + %s,
-            last_seen = NOW()
-        WHERE topic_id = %s
-    """
+        data_update = [
+            (topic_id,)
+            for topic_id in conteo_topics
+        ]
 
-    data_update = [
-        (cantidad, topic_id)
-        for topic_id, cantidad in conteo_topics.items()
-    ]
+        cursor.executemany(update_query, data_update)
 
-    cursor.executemany(update_query, data_update)
-
-    connection.commit()
-
-    cursor.close()
-    connection.close()
+        connection.commit()
 
     print("Tweets insertados:", len(tweets_topic))
     print("Topics actualizados:", len(conteo_topics))
@@ -438,9 +406,10 @@ def preparar_clusters_similares(
 def crear_topic_nuevo(cluster_id, centroide):
 
     connection = get_db_connection()
-    cursor = connection.cursor()
+    cursor = None
 
     try:
+        cursor = connection.cursor()
         nombre_temporal = f"NUEVO_CLUSTER_{cluster_id}"
 
         insert_topic = """
@@ -507,8 +476,11 @@ def crear_topic_nuevo(cluster_id, centroide):
         return None
 
     finally:
-        cursor.close()
-        connection.close()
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            connection.close()
 
 def crear_todos_los_topics_nuevos(df_topics_nuevos,centroides_nuevos,df_clusters):
     if df_topics_nuevos is None or df_topics_nuevos.empty:
