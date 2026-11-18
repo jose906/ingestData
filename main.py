@@ -590,7 +590,7 @@ def update_all():
 
 # ================== CLOUD RUN HANDLER ==================
 
-@app.route("/ingest", methods=["POST"])
+@app.route("/ingest", methods=["GET"])
 def ingest_handler():
     conn = None
     cur = None
@@ -792,7 +792,7 @@ def health():
             app.logger.warning("Fallo cerrando conexión MySQL", exc_info=True)
 
 
-@app.route("/reprocess", methods=["POST"])
+@app.route("/reprocess", methods=["GET"])
 def reprocess_handler():
     try:
         resultado = reprocess_pending_tweets(limit=100)
@@ -1055,7 +1055,7 @@ def x_search_conversation(root_tweetid: str,since_id: str | None,next_token: str
 
     return r.json()
 
-@app.route("/ingest_replies", methods=["POST"])
+@app.route("/ingest_replies", methods=["GET"])
 def ingest_replies_handler():
     """
     Extrae replies NUEVOS dirigidos a tus cuentas,
@@ -1325,7 +1325,7 @@ def ejecutar_stance_posts_handler():
     )
 
 
-@app.route("/stance/topics", methods=["POST"])
+@app.route("/stance/topics", methods=["GET"])
 def ejecutar_stance_topics_handler():
     # Primero calcula los targets de topicos que aún no los tengan.
     # Después clasifica comentarios pendientes por topico, sin filtro de fecha.
@@ -1353,7 +1353,7 @@ def ejecutar_stance_topics_handler():
     )
 
 
-@app.route("/selectTopics", methods=["POST"])
+@app.route("/selectTopics", methods=["GET"])
 def select_topics():
     try:
         df_no_asignados , df_asignados = classify_tweets()
@@ -1367,7 +1367,7 @@ def select_topics():
         app.logger.exception("Falló el trabajo de tópicos")
         return jsonify({"ok": False, "error": "Falló el trabajo de tópicos"}), 500
     
-@app.route("/create_topics", methods=["POST"])
+@app.route("/create_topics", methods=["GET"])
 def create_topics():
     try:  
         a = insertar_nuevos_topicos(aplicar_cambios=True)
