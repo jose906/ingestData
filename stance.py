@@ -735,12 +735,18 @@ def get_topics_pending(
 ):
     return consultar_todos("""
         SELECT
-            topic_id,
-            topic_name
-        FROM topics
-        WHERE target_type IS NULL
+            tp.topic_id,
+            tp.topic_name
+        FROM topics tp
+        WHERE tp.target_type IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM topic_tweets tt
+              JOIN Tweets t ON t.tweetid = tt.tweetid
+              WHERE tt.topic_id = tp.topic_id
+          )
 
-        ORDER BY last_seen DESC, topic_id DESC
+        ORDER BY tp.last_seen DESC, tp.topic_id DESC
         LIMIT %s
     """, (limit,))
 
@@ -815,7 +821,6 @@ def ejecutar_targets_topicos(
                     f"Topico {topico['topic_id']} sin tweets"
                 )
 
-                resumen["fallidos"] += 1
                 continue
 
             target = analizar_target_topic(
