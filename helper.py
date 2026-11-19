@@ -34,22 +34,16 @@ def detectar_topic_especial(texto):
 
     # 4. Programación
     if (
-        "programación" in texto_lower
-        or "programacion" in texto_lower
-        or "en vivo:" in texto_lower
-        or "no te pierdas" in texto_lower
-        or "sintoniza" in texto_lower
+        re.search(r"\b(?:nuestra programaci[oó]n|programaci[oó]n de hoy|sintoniza)\b", texto_lower)
+        or re.match(r"en vivo:\s*(?:te esperamos|acompaña[nm]os|mira|mire)\b", texto_lower)
     ):
         return "__PROGRAMACION__"
 
     # 5. Promoción
-    if (
-        "promoción" in texto_lower
-        or "promocion" in texto_lower
-        or "participa y gana" in texto_lower
-        or "sorteo" in texto_lower
-        or "suscríbete" in texto_lower
-        or "suscribete" in texto_lower
+    if re.search(
+        r"\b(?:participa y gana|participa en (?:el|nuestro) sorteo|"
+        r"nuestro sorteo|promoci[oó]n exclusiva|suscr[ií]bete)\b",
+        texto_lower,
     ):
         return "__PROMOCION__"
 

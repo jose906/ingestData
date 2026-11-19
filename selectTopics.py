@@ -1,19 +1,18 @@
 from contextlib import closing
 from database import get_db_connection
-import re
+import os
 import json
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
+from itertools import islice
 import helper
 
 
-URL_REGEX = re.compile(r"https?://\S+|www\.\S+")
 UMBRAL = 0.8
-
-
-  
+MARGEN_MINIMO = float(os.getenv("TOPIC_MIN_MARGIN", "0.03"))
+UMBRAL_CENTROIDE = float(os.getenv("TOPIC_CENTROID_MIN_SIMILARITY", "0.85"))
 
 TOPICS_ESPECIALES = [
     "__SOLO_LINK__",
@@ -204,9 +203,10 @@ def recalcular_centroide_topic(cursor, topic_id):
         JOIN tweet_embeddings e
             ON tt.tweetid = e.tweetid
         WHERE tt.topic_id = %s
+          AND tt.similarity >= %s
     """
 
-    cursor.execute(query, (topic_id,))
+    cursor.execute(query, (topic_id, UMBRAL_CENTROIDE))
     results = cursor.fetchall()
 
     if not results:
@@ -262,139 +262,80 @@ def classify_tweets():
     asignados = []
     no_asignados = []
 
-    # -----------------------------------------
-    # 1. Detectar tópicos especiales primero
-    # -----------------------------------------
+    tweets_normales = []
 
-    indices_normales = []
-
-    for i in range(len(df_tweets)):
-        tweetid = df_tweets.iloc[i]["tweetid"]
-        texto = df_tweets.iloc[i]["text"]
-
-        topic_especial = helper.detectar_topic_especial(texto)
-
-        if topic_especial is not None:
-            topic_especial_id = topicos_especiales.get(topic_especial)
-
-            if topic_especial_id is not None:
-                asignados.append({
-                    "tweetid": tweetid,
-                    "topic_id": topic_especial_id,
-                    "similarity": 1.0
-                })
-
-                print("--------------------------------")
-                print("TÓPICO ESPECIAL DETECTADO")
-                print("Tipo:", topic_especial)
-                print("Tweet:", texto[:150])
-                print("--------------------------------")
-
-                continue
-
-        # Solo estos tweets necesitan similitud semántica
-        indices_normales.append(i)
-
-    # -----------------------------------------
-    # 2. Clasificar solamente tweets normales
-    # -----------------------------------------
-
-    if indices_normales:
-
-        if df_topics.empty:
-            print("No hay topics normales con embeddings")
-
-            for i in indices_normales:
-                no_asignados.append({
-                    "tweetid": df_tweets.iloc[i]["tweetid"],
-                    "text": df_tweets.iloc[i]["text"],
-                    "embedding": df_tweets.iloc[i]["embedding"],
-                    "similarity": 0.0
-                })
-
+    for tweet in df_tweets.to_dict(orient="records"):
+        topic_especial = helper.detectar_topic_especial(tweet["text"])
+        topic_id = topicos_especiales.get(topic_especial)
+        if topic_id is None:
+            tweets_normales.append(tweet)
         else:
-            df_tweets_normales = df_tweets.iloc[indices_normales].reset_index(
-                drop=True
-            )
+            asignados.append({
+                "tweetid": tweet["tweetid"],
+                "topic_id": topic_id,
+                "similarity": 1.0,
+            })
 
-            topic_matrix = np.array(
-                df_topics["embedding"].tolist(),
-                dtype=np.float32
-            )
+    if tweets_normales and df_topics.empty:
+        no_asignados = [
+            {**tweet, "similarity": 0.0, "reason": "no_topics"}
+            for tweet in tweets_normales
+        ]
+    elif tweets_normales:
+        topic_ids = df_topics["topic_id"].tolist()
+        topic_matrix = np.asarray(df_topics["embedding"].tolist(), dtype=np.float32)
+        batch_size = 1000
 
-            tweet_matrix = np.array(
-                df_tweets_normales["embedding"].tolist(),
-                dtype=np.float32
-            )
+        for start in range(0, len(tweets_normales), batch_size):
+            batch = tweets_normales[start:start + batch_size]
+            tweet_matrix = np.asarray([tweet["embedding"] for tweet in batch], dtype=np.float32)
+            similarities = cosine_similarity(tweet_matrix, topic_matrix)
+            rows = np.arange(len(batch))
+            best_indices = similarities.argmax(axis=1)
+            best_scores = similarities[rows, best_indices]
+            second_indices = None
 
-            BATCH_SIZE = 1000
+            if len(topic_ids) > 1:
+                similarities[rows, best_indices] = -np.inf
+                second_indices = similarities.argmax(axis=1)
 
-            best_idx = []
-            best_score = []
+            for row, tweet in enumerate(batch):
+                topic_id = topic_ids[best_indices[row]]
+                score = float(best_scores[row])
+                second_topic_id = second_score = margin = None
+                if second_indices is not None:
+                    second_idx = second_indices[row]
+                    second_topic_id = topic_ids[second_idx]
+                    second_score = float(similarities[row, second_idx])
+                    margin = score - second_score
 
-            for start in range(0, len(tweet_matrix), BATCH_SIZE):
-                end = start + BATCH_SIZE
-
-                batch = tweet_matrix[start:end]
-
-                sim_batch = cosine_similarity(
-                    batch,
-                    topic_matrix
-                )
-
-                best_idx.extend(
-                    np.argmax(sim_batch, axis=1)
-                )
-
-                best_score.extend(
-                    np.max(sim_batch, axis=1)
-                )
-
-            best_idx = np.array(best_idx)
-            best_score = np.array(best_score)
-
-            # -----------------------------------------
-            # 3. Aplicar umbral 0.80
-            # -----------------------------------------
-
-            for i in range(len(df_tweets_normales)):
-                tweetid = df_tweets_normales.iloc[i]["tweetid"]
-                score = float(best_score[i])
-
-                if score >= UMBRAL:
-                    topic_id = int(
-                        df_topics.iloc[best_idx[i]]["topic_id"]
-                    )
-
+                if score >= UMBRAL and (margin is None or margin >= MARGEN_MINIMO):
                     asignados.append({
-                        "tweetid": tweetid,
+                        "tweetid": tweet["tweetid"],
                         "topic_id": topic_id,
-                        "similarity": score
+                        "similarity": score,
                     })
-
                 else:
                     no_asignados.append({
-                        "tweetid": tweetid,
-                        "text": df_tweets_normales.iloc[i]["text"],
-                        "embedding": df_tweets_normales.iloc[i]["embedding"],
-                        "similarity": score
+                        **tweet,
+                        "similarity": score,
+                        "candidate_topic_id": topic_id,
+                        "second_topic_id": second_topic_id,
+                        "second_similarity": second_score,
+                        "margin": margin,
+                        "reason": "below_threshold" if score < UMBRAL else "ambiguous",
                     })
 
-    # -----------------------------------------
-    # 4. Resultados
-    # -----------------------------------------
-
-    print("--------------------------------")
     print("Asignados:", len(asignados))
-    print("No asignados:", len(no_asignados))
-    print("--------------------------------")
-
-    print(pd.DataFrame(asignados).head())
-    print(pd.DataFrame(no_asignados).head())
-
-    # -----------------------------------------
-    # 5. Guardar asignaciones
-    # -----------------------------------------
+    print("No asignados por motivo:", dict(Counter(tweet["reason"] for tweet in no_asignados)))
+    ambiguos = (tweet for tweet in no_asignados if tweet["reason"] == "ambiguous")
+    for tweet in islice(ambiguos, 10):
+        print("Asignación ambigua:", {
+            key: tweet[key] for key in (
+                "tweetid", "candidate_topic_id", "similarity",
+                "second_topic_id", "second_similarity", "margin",
+            )
+        })
 
     insert_tweets_topic(pd.DataFrame(asignados), set(topicos_especiales.values()))
 
@@ -402,10 +343,3 @@ def classify_tweets():
         pd.DataFrame(no_asignados),
         pd.DataFrame(asignados)
     )
-
-
-
-
-
-
-
