@@ -102,7 +102,8 @@ def close_job_connection(conn, cursor, lock_name, acquired):
 
 def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
     tweet_id = tweet["id"]
-    text = tweet.get("text", "")
+    note_tweet = tweet.get("note_tweet") or {}
+    text = note_tweet.get("text") or tweet.get("text", "")
     created_at = tweet.get("created_at")
 
     created_dt = None
@@ -379,7 +380,7 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
     params = {
         "query": f"from:{username}",
         "max_results": 100,
-        "tweet.fields": "created_at,text,entities,author_id",
+        "tweet.fields": "created_at,text,entities,author_id,note_tweet",
     }
    
     # Si ya estamos recorriendo páginas anteriores,
