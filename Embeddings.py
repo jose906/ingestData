@@ -4,7 +4,6 @@ import json
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from collections import Counter
 import umap
 import hdbscan
 import helper
@@ -105,49 +104,22 @@ def insert_tweets_topic(df):
         print("No hay tweets para insertar")
         return
 
+    filas = [
+        (int(fila.topic_id), int(fila.tweetid), float(fila.similarity))
+        for fila in df.drop_duplicates(subset="tweetid").itertuples(index=False)
+    ]
+    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
+        try:
+            nuevas = helper.guardar_relaciones_nuevas(cursor, filas)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    print("Tweets insertados:", len(nuevas))
+    print("Topics actualizados:", len(helper.topics_principales(nuevas)))
 
 
-    with closing(get_db_connection()) as connection, closing(connection.cursor()) as cursor:
-        insert_query = """
-            INSERT INTO topic_tweets
-                (topic_id, tweetid, similarity, assigned_at)
-            VALUES
-                (%s, %s, %s, NOW())
-            ON DUPLICATE KEY UPDATE
-                similarity = VALUES(similarity),
-                assigned_at = NOW()
-        """
-
-        tweets_topic = df.to_dict(orient="records")
-        data_to_insert = [
-            (item["topic_id"], item["tweetid"], item["similarity"])
-            for item in tweets_topic
-        ]
-
-        cursor.executemany(insert_query, data_to_insert)
-
-        conteo_topics = Counter(item["topic_id"] for item in tweets_topic)
-
-        update_query = """
-            UPDATE topics
-            SET
-                total_tweets = (SELECT COUNT(*) FROM topic_tweets tt WHERE tt.topic_id = topics.topic_id),
-                last_seen = NOW()
-            WHERE topic_id = %s
-        """
-
-        data_update = [
-            (topic_id,)
-            for topic_id in conteo_topics
-        ]
-
-        cursor.executemany(update_query, data_update)
-
-        connection.commit()
-
-    print("Tweets insertados:", len(tweets_topic))
-    print("Topics actualizados:", len(conteo_topics))
-    
 def classify_tweets():
     df_topics = pd.DataFrame(get_topic_embeddings())
     df_tweets = pd.DataFrame(get_tweet_embedding())

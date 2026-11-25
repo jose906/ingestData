@@ -37,11 +37,6 @@ TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
 #TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
 
 
-USER_IDS = [
-    '65444625', '94438031', '935136477616443393', '209279715',
-    '2800854409', '735321776', '44489439', '311132840',
-    '525394081', '1742290477234208768', '118861947', '188870982'
-]
 MAX_USERS_PER_RUN = 5
 MAX_RESULTS_PER_CALL = 100  # máximo permitido por endpoint
 REQUEST_SLEEP_SECONDS = 0.2 
@@ -1377,10 +1372,11 @@ def select_topics():
         acquired = True
 
         df_no_asignados, df_asignados = classify_tweets()
+        tweets_asignados = int(df_asignados["tweetid"].nunique()) if not df_asignados.empty else 0
         return jsonify({
             "ok": True,
             "tweets_no_asignados": len(df_no_asignados),
-            "tweets_asignados": len(df_asignados),
+            "tweets_asignados": tweets_asignados,
         }), 200
     except Exception:
         app.logger.exception("Falló el trabajo de tópicos")

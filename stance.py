@@ -1,4 +1,5 @@
 from database import get_db_connection
+from helper import TOPIC_PRINCIPAL_SQL
 
 
 import json
@@ -733,7 +734,7 @@ def get_topics_pending(
     limit=10,
     desde=None
 ):
-    return consultar_todos("""
+    return consultar_todos(f"""
         SELECT
             tp.topic_id,
             tp.topic_name
@@ -743,7 +744,7 @@ def get_topics_pending(
               SELECT 1
               FROM topic_tweets tt
               JOIN Tweets t ON t.tweetid = tt.tweetid
-              WHERE tt.topic_id = tp.topic_id
+              WHERE tt.topic_id = tp.topic_id AND {TOPIC_PRINCIPAL_SQL}
           )
 
         ORDER BY tp.last_seen DESC, tp.topic_id DESC
@@ -755,7 +756,7 @@ def get_tweets_topic(
     topic_id,
     limit=20
 ):
-    return consultar_todos("""
+    return consultar_todos(f"""
         SELECT
             t.tweetid,
             t.text,
@@ -765,7 +766,7 @@ def get_tweets_topic(
         JOIN Tweets t
           ON t.tweetid = tt.tweetid
 
-        WHERE tt.topic_id = %s
+        WHERE tt.topic_id = %s AND {TOPIC_PRINCIPAL_SQL}
 
         ORDER BY tt.similarity DESC
         LIMIT %s

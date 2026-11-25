@@ -1,4 +1,5 @@
 from database import get_db_connection
+from helper import TOPIC_PRINCIPAL_SQL
 import os
 import pandas as pd
 from google import genai
@@ -14,7 +15,7 @@ import traceback
 def get_topics(limit_topics=2):
     connection = get_db_connection()
 
-    query = """
+    query = f"""
     SELECT
         tp.topic_id,
         tp.topic_name,
@@ -36,6 +37,7 @@ def get_topics(limit_topics=2):
         ON tp.topic_id = tt.topic_id
     JOIN Tweets tw
         ON tt.tweetid = tw.tweetid
+    WHERE {TOPIC_PRINCIPAL_SQL}
     ORDER BY tp.topic_id, tt.similarity DESC
     """
 
@@ -309,6 +311,20 @@ def procesar_resultados_topics(df):
                 )
 
             else:
+
+                # Una relación preexistente puede venir de fuera del clasificador.
+                # Eliminar su principal promovería una asociación secundaria.
+                cursor.execute(f"""
+                    SELECT 1
+                    FROM topic_tweets tt
+                    JOIN topic_tweets posterior
+                        ON posterior.tweetid = tt.tweetid AND posterior.id > tt.id
+                    WHERE tt.topic_id = %s AND {TOPIC_PRINCIPAL_SQL}
+                    LIMIT 1
+                """, (topic_id,))
+                if cursor.fetchone():
+                    print(f"Topic {topic_id}: se conserva por tener asociaciones secundarias.")
+                    continue
 
                 # 1. Eliminar relaciones con tweets
                 cursor.execute("""
