@@ -8,12 +8,12 @@ from collections import Counter
 import helper
 
 
-UMBRAL = 0.8
+UMBRAL = 0.79
 MARGEN_MINIMO = float(os.getenv("TOPIC_MIN_MARGIN", "0.03"))
 UMBRAL_CENTROIDE = float(os.getenv("TOPIC_CENTROID_MIN_SIMILARITY", "0.85"))
 
 MAX_TOPICS_PER_TWEET = max(1, int(os.getenv("MAX_TOPICS_PER_TWEET", "3")))
-SECONDARY_TOPIC_THRESHOLD = float(os.getenv("SECONDARY_TOPIC_THRESHOLD", "0.85"))
+SECONDARY_TOPIC_THRESHOLD = float(os.getenv("SECONDARY_TOPIC_THRESHOLD", "0.84"))
 
 TOPICS_ESPECIALES = [
     "__SOLO_LINK__",

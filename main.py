@@ -17,6 +17,12 @@ from stance import (
     ejecutar_targets_topicos,
     ejecutar_stance_por_topico
 )
+from web_scraper import (
+    discover_historical_urls,
+    extract_external_urls,
+    process_pending_articles,
+    register_tweet_urls,
+)
 
 
 
@@ -50,7 +56,7 @@ def authorize_job():
     if request.endpoint not in {
         "ingest_handler", "ingest_replies_handler", "reprocess_handler",
         "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
-        "select_topics", "create_topics",
+        "select_topics", "create_topics", "discover_articles_handler", "scrape_articles_handler",
     }:
         return None
 
@@ -159,6 +165,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
             )
         )
 
+        register_tweet_urls(cur, tweet_id, extract_external_urls(tweet))
         return 0
 
     # --------------------------------------------------
@@ -237,6 +244,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         )
     )
 
+    register_tweet_urls(cur, tweet_id, extract_external_urls(tweet))
     return 1
 
 
@@ -838,6 +846,42 @@ def set_state(cursor, key: str, value):
         "ON DUPLICATE KEY UPDATE v=VALUES(v)",
         (key, value)
     )
+
+
+def run_article_job(lock_name, job):
+    started = time.monotonic()
+    conn = None
+    cursor = None
+    acquired = False
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT GET_LOCK(%s, 0)", (lock_name,))
+        acquired = cursor.fetchone() == (1,)
+        metrics = job(conn, cursor, started) if acquired else {"busy": True}
+        return jsonify(ok=True, elapsed_seconds=round(time.monotonic() - started, 2), **metrics), 200
+    except Exception as error:
+        if conn is not None:
+            rollback_job(conn)
+        app.logger.error("Falló %s (%s, MySQL %s)", lock_name, type(error).__name__, getattr(error, "errno", None))
+        return jsonify(ok=False, error="Falló el trabajo de artículos"), 500
+    finally:
+        close_job_connection(conn, cursor, lock_name, acquired)
+
+
+@app.route("/articles/discover", methods=["GET"])
+def discover_articles_handler():
+    def discover(conn, cursor, started):
+        now = datetime.now(BOLIVIA_TZ).replace(tzinfo=None)
+        return discover_historical_urls(conn, cursor, now, started, get_state, set_state)
+
+    return run_article_job("netvora_articles_discover", discover)
+
+
+@app.route("/articles/scrape", methods=["GET"])
+def scrape_articles_handler():
+    return run_article_job("netvora_articles_scrape", process_pending_articles)
+
 
 def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
     cursor.execute(
