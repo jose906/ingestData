@@ -17,13 +17,6 @@ from stance import (
     ejecutar_targets_topicos,
     ejecutar_stance_por_topico
 )
-from web_scraper import (
-    discover_historical_urls,
-    extract_external_urls,
-    process_pending_articles,
-    recover_historical_urls,
-    register_tweet_urls,
-)
 
 
 
@@ -41,7 +34,6 @@ def x_headers():
 
 
 TWEETS_URL = "https://api.twitter.com/2/tweets/search/recent"
-TWEET_LOOKUP_URL = "https://api.x.com/2/tweets"
 #TWEETS_URL = "https://api.twitter.com/2/users/{}/tweets"
 
 
@@ -58,8 +50,7 @@ def authorize_job():
     if request.endpoint not in {
         "ingest_handler", "ingest_replies_handler", "reprocess_handler",
         "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
-        "select_topics", "create_topics", "discover_articles_handler", "scrape_articles_handler",
-        "recover_article_urls_handler",
+        "select_topics", "create_topics",
     }:
         return None
 
@@ -104,9 +95,8 @@ def close_job_connection(conn, cursor, lock_name, acquired):
 
 # ================== INSERT TWEETS ==================
 
-def insert_or_update_tweet(cur, tweet, tweetuser_pk_id, *, url_metrics=None):
+def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
     tweet_id = tweet["id"]
-    links = extract_external_urls(tweet, metrics=url_metrics)
     note_tweet = tweet.get("note_tweet") or {}
     text = note_tweet.get("text") or tweet.get("text", "")
     created_at = tweet.get("created_at")
@@ -169,7 +159,6 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id, *, url_metrics=None):
             )
         )
 
-        register_tweet_urls(cur, tweet_id, links)
         return 0
 
     # --------------------------------------------------
@@ -248,7 +237,6 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id, *, url_metrics=None):
         )
     )
 
-    register_tweet_urls(cur, tweet_id, links)
     return 1
 
 
@@ -476,16 +464,6 @@ def fetch_tweets_for_user(username: str,last_tweetid=None,pagination_token=None)
     }
     
     
-def fetch_tweets_by_ids(tweetids):
-    return requests.get(
-        TWEET_LOOKUP_URL,
-        headers=x_headers(),
-        params={"ids": ",".join(tweetids), "tweet.fields": "entities,note_tweet"},
-        timeout=20,
-        allow_redirects=False,
-    )
-
-
 def update_last_tweetid(cur, idTweetUser, last_tweetid):
     sql = """
         UPDATE TweetUser 
@@ -714,12 +692,11 @@ def ingest_handler():
         next_token = resultado["next_token"]
 
         guardados = 0
-        url_metrics = {"tweets_with_url_entities": 0, "expanded_urls_received": 0, "tweets_only_tco": 0}
 
         # ----------------------------------------
         # Confirmar las escrituras y el avance de página en la misma transacción.
         for tweet in tweets:
-            guardados += insert_or_update_tweet(cur, tweet, user_id, url_metrics=url_metrics)
+            guardados += insert_or_update_tweet(cur, tweet, user_id)
 
         # TODAVÍA QUEDAN MÁS PÁGINAS
         # ----------------------------------------
@@ -735,7 +712,6 @@ def ingest_handler():
                 "user": username,
                 "tweets_recibidos": len(tweets),
                 "tweets_guardados": guardados,
-                "article_urls": url_metrics,
                 "pagination_pending": True,
                 "message": "Página guardada. La cuenta continuará en la siguiente ejecución."
             }), 200
@@ -771,7 +747,6 @@ def ingest_handler():
             "user": username,
             "tweets_recibidos": len(tweets),
             "tweets_guardados": guardados,
-            "article_urls": url_metrics,
             "pagination_pending": False,
             "last_tweetid": nuevo_last_tweetid,
             "message": "Cuenta procesada completamente."
@@ -863,57 +838,6 @@ def set_state(cursor, key: str, value):
         "ON DUPLICATE KEY UPDATE v=VALUES(v)",
         (key, value)
     )
-
-
-def run_article_job(lock_name, job):
-    started = time.monotonic()
-    conn = None
-    cursor = None
-    acquired = False
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT GET_LOCK(%s, 0)", (lock_name,))
-        acquired = cursor.fetchone() == (1,)
-        metrics = job(conn, cursor, started) if acquired else {"busy": True}
-        status = metrics.pop("status_code", 200)
-        response = jsonify(ok=status < 400, elapsed_seconds=round(time.monotonic() - started, 2), **metrics)
-        if status == 429 and "retry_after_seconds" in metrics:
-            response.headers["Retry-After"] = str(metrics["retry_after_seconds"])
-        return response, status
-    except Exception as error:
-        if conn is not None:
-            rollback_job(conn)
-        app.logger.error("Falló %s (%s, MySQL %s)", lock_name, type(error).__name__, getattr(error, "errno", None))
-        return jsonify(ok=False, error="Falló el trabajo de artículos"), 500
-    finally:
-        close_job_connection(conn, cursor, lock_name, acquired)
-
-
-@app.route("/articles/discover", methods=["GET"])
-def discover_articles_handler():
-    def discover(conn, cursor, started):
-        now = datetime.now(BOLIVIA_TZ).replace(tzinfo=None)
-        return discover_historical_urls(conn, cursor, now, started, get_state, set_state)
-
-    return run_article_job("netvora_articles_discover", discover)
-
-
-@app.route("/articles/scrape", methods=["GET"])
-def scrape_articles_handler():
-    return run_article_job("netvora_articles_scrape", process_pending_articles)
-
-
-@app.route("/articles/recover_urls", methods=["GET"])
-def recover_article_urls_handler():
-    if request.method == "HEAD":
-        return "", 204
-
-    def recover(conn, cursor, _started):
-        return recover_historical_urls(conn, cursor, fetch_tweets_by_ids, get_state, set_state)
-
-    return run_article_job("netvora_articles_recover", recover)
-
 
 def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
     cursor.execute(

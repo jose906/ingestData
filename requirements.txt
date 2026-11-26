@@ -8,8 +8,6 @@ gunicorn
 pandas
 google-genai
 python-dateutil
-trafilatura==2.3.1
-protego==0.7.0
 
 
 
