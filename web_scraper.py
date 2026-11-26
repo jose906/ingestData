@@ -40,7 +40,12 @@ FILE_EXTENSIONS = frozenset(
     "mpeg msi ogg ogv pdf png ppt pptx rar rss svg tar tif tiff txt wav webm webp xls xlsx xml zip"
     .split()
 )
-URL_PATTERN = re.compile(r"(?<![\w@/])(?:https?://|www\.)[^\s<>\x00-\x1f\"“”‘’]+", re.I)
+URL_TEXT = r"[^\s<>\x00-\x1f\"“”‘’]+"
+BARE_URL_PATTERN = re.compile(r"(?:(?:[^\W_]|-){1,63}\.)+[a-z]{2,63}/" + URL_TEXT, re.I)
+URL_PATTERN = re.compile(
+    rf"(?<![\w@/])(?:https?://|www\.){URL_TEXT}|(?<![\w@./:%=?&+#\\-]){BARE_URL_PATTERN.pattern}",
+    re.I,
+)
 DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 NUMERIC_HOST = re.compile(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*")
 NON_PUBLIC_NETWORKS = tuple(map(ipaddress.ip_network, (
@@ -123,7 +128,7 @@ def normalize_url(url, *, strip_tracking=True):
     url = url.strip()
     if not url or len(url) > MAX_URL_LENGTH or re.search(r"[\s\x00-\x1f\x7f\\]", url):
         return None
-    if url.lower().startswith("www."):
+    if url.lower().startswith("www.") or BARE_URL_PATTERN.fullmatch(url):
         url = "https://" + url
     try:
         parts = urlsplit(url)
@@ -426,7 +431,14 @@ def discover_historical_urls(conn, cursor, now, started, get_state, set_state):
     else:
         high, review = int(state), 0
 
-    metrics = {"tweets_scanned": 0, "tweets_reviewed": 0, "links_registered": 0}
+    metrics = {"tweets_scanned": 0, "tweets_reviewed": 0, "urls_found": 0, "tco_urls_found": 0, "links_registered": 0}
+
+    def register_text(tweetid, tweet_text):
+        urls = extract_urls_from_text(tweet_text)
+        metrics["urls_found"] += len(urls)
+        metrics["tco_urls_found"] += sum(urlsplit(normalize_url(url)).hostname == "t.co" for url in urls)
+        metrics["links_registered"] += register_tweet_urls(cursor, tweetid, urls)
+
     if high and time.monotonic() < deadline:
         # Reserve part of each batch for rows that can arrive below the high-water mark.
         quota = max(1, limit // 4)
@@ -434,7 +446,7 @@ def discover_historical_urls(conn, cursor, now, started, get_state, set_state):
         for tweetid, tweet_text in rows:
             if time.monotonic() >= deadline:
                 break
-            metrics["links_registered"] += register_tweet_urls(cursor, tweetid, extract_urls_from_text(tweet_text))
+            register_text(tweetid, tweet_text)
             metrics["tweets_reviewed"] += 1
             review = int(tweetid)
         if metrics["tweets_reviewed"] == len(rows) < quota:
@@ -445,7 +457,7 @@ def discover_historical_urls(conn, cursor, now, started, get_state, set_state):
         for tweetid, tweet_text in rows:
             if time.monotonic() >= deadline:
                 break
-            metrics["links_registered"] += register_tweet_urls(cursor, tweetid, extract_urls_from_text(tweet_text))
+            register_text(tweetid, tweet_text)
             metrics["tweets_scanned"] += 1
             high = int(tweetid)
 
@@ -856,9 +868,9 @@ def fetch_pending_articles(cursor, settings):
         f"""
         SELECT article_id, url, COALESCE(scraping_attempts, 0) FROM web_articles
         WHERE COALESCE(scraping_attempts, 0) < %s AND {ELIGIBLE_FOR_SCRAPING}
-        ORDER BY article_id LIMIT %s
+        ORDER BY (url LIKE %s OR url LIKE %s), article_id LIMIT %s
         """,
-        (settings.max_attempts, settings.limit),
+        (settings.max_attempts, "https://t.co/%", "http://t.co/%", settings.limit),
     )
     return cursor.fetchall()
 
@@ -996,7 +1008,7 @@ def process_pending_articles(conn, cursor, started):
     deadline = started + settings.max_seconds
     metrics = {
         "articles_processed": 0, "completed": 0, "failed": 0, "skipped": 0,
-        "duplicates": 0, "superseded": 0, "recovered": 0,
+        "duplicates": 0, "superseded": 0, "recovered": 0, "scraping_errors": {},
     }
     scraper = ArticleScraper(settings, deadline)
     metrics["recovered"] = _recover_stale_articles(cursor, settings)
@@ -1017,6 +1029,9 @@ def process_pending_articles(conn, cursor, started):
             result = scraper.scrape_article(url)
         except ScrapeError as error:
             outcome = _save_failure(cursor, article_id, attempt, error, settings)
+            if outcome in {"failed", "skipped"}:
+                errors = metrics["scraping_errors"]
+                errors[error.code] = errors.get(error.code, 0) + 1
         else:
             outcome = save_article_result(cursor, article_id, attempt, result)
 

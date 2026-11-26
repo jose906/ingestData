@@ -93,6 +93,12 @@ class UrlTests(unittest.TestCase):
             f"Lee ({NEWS}). También www.diario.example/tema_(Bolivia)! y https://medio.example/foto.JPG?x=1"
         ), [NEWS, "www.diario.example/tema_(Bolivia)"])
 
+    def test_text_extracts_article_without_scheme_and_keeps_visible_source(self):
+        link = "diario.com.bo/pais/nota?id=2"
+        text = f"Leé ({link}). {SHORT} correo@diario.com.bo/pais/nota ftp://diario.com.bo/archivo"
+        self.assertEqual(scraper.extract_urls_from_text(text), [link, SHORT])
+        self.assertEqual(scraper.normalize_url(link), "https://" + link)
+
     def test_normalization_keeps_parameters_that_identify_the_article(self):
         source = " HTTPS://MEDIO.EXAMPLE:443/noticia?utm_medium=x&id=42&tag=a+b&tag=c%2Fd&FbClId=abc#foto "
         self.assertEqual(scraper.normalize_url(source), "https://medio.example/noticia?id=42&tag=a+b&tag=c%2Fd")
@@ -475,7 +481,8 @@ class QueueTests(unittest.TestCase):
         select = self.cursor.execute.call_args
         self.assertIn("scraping_error = 'redirect_loop' AND scraping_retry_at IS NULL", select.args[0])
         self.assertIn("COALESCE(scraping_attempts, 0) < %s", select.args[0])
-        self.assertEqual(select.args[1], (3, self.settings.limit))
+        self.assertIn("ORDER BY (url LIKE %s OR url LIKE %s), article_id", select.args[0])
+        self.assertEqual(select.args[1], (3, "https://t.co/%", "http://t.co/%", self.settings.limit))
 
         self.assertTrue(scraper._claim_article(self.cursor, 22, 1))
         update = self.cursor.execute.call_args
@@ -542,8 +549,28 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(recovery.args[1], (3, 11))
         self.assertEqual(conn.commit.call_count, 3)
 
+    def test_scraping_metrics_show_why_an_article_did_not_complete(self):
+        conn = Mock()
+        self.cursor.fetchall.side_effect = [[], [(11, SHORT, 0), (22, NEWS, 0)]]
+        errors = [scraper.ScrapeError("robots_disallowed", skipped=True), scraper.ScrapeError("tls_error")]
+        with patch.object(scraper.ArticleScraper, "scrape_article", side_effect=errors):
+            with self.assertLogs(scraper.LOGGER, "WARNING"):
+                result = scraper.process_pending_articles(conn, self.cursor, time.monotonic())
+        self.assertEqual((result["articles_processed"], result["skipped"], result["failed"]), (2, 1, 1))
+        self.assertEqual(result["scraping_errors"], {"robots_disallowed": 1, "tls_error": 1})
+
 
 class DiscoveryTests(unittest.TestCase):
+    def test_discovery_reports_found_urls_even_if_they_were_already_registered(self):
+        cursor, conn = Mock(), Mock()
+        bare = "diario.com.bo/actualidad/nota"
+        cursor.fetchall.return_value = [(100, f"{SHORT} o {bare}")]
+        with patch.object(scraper, "register_tweet_urls", return_value=0) as register:
+            result = scraper.discover_historical_urls(conn, cursor, datetime.now(), time.monotonic(),
+                                                     Mock(return_value="0"), Mock())
+        register.assert_called_once_with(cursor, 100, [SHORT, bare])
+        self.assertEqual((result["urls_found"], result["tco_urls_found"], result["links_registered"]), (2, 1, 0))
+
     @patch.dict("os.environ", {"WEB_ARTICLES_DISCOVER_LIMIT": "4"})
     def test_older_tweet_ids_are_revisited_while_newer_tweets_keep_arriving(self):
         now = datetime(2026, 11, 26, 8)
