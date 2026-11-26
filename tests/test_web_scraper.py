@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from unittest.mock import MagicMock, Mock, call, patch
+from urllib.parse import urlsplit
 
 import requests
 from mysql.connector import DataError, Error
@@ -68,7 +69,11 @@ class UrlTests(unittest.TestCase):
             {"url": "https://t.co/social", "expanded_url": "https://x.com/user/status/100"},
             {"url": "https://t.co/unresolved", "expanded_url": None},
         ]}, "text": f"Mira {SHORT} https://t.co/social y {SECOND}. {NEWS}?fbclid=123"}
-        self.assertEqual(scraper.extract_external_urls(tweet), [NEWS, "https://t.co/unresolved", SECOND])
+        unresolved = "https://t.co/unresolved"
+        self.assertEqual(scraper.extract_external_urls(tweet), [
+            scraper.TweetLink(SHORT, NEWS), scraper.TweetLink(unresolved, unresolved),
+            scraper.TweetLink(SECOND, SECOND),
+        ])
 
     def test_note_tweet_and_base_entities_are_combined(self):
         tweet = {
@@ -78,7 +83,9 @@ class UrlTests(unittest.TestCase):
                 "url": SHORT, "expanded_url": NEWS,
             }]}},
         }
-        self.assertEqual(scraper.extract_external_urls(tweet), [NEWS, SECOND])
+        self.assertEqual(scraper.extract_external_urls(tweet), [
+            scraper.TweetLink(SHORT, NEWS), scraper.TweetLink(SECOND, SECOND),
+        ])
         self.assertEqual(scraper.extract_external_urls({"note_tweet": None, "text": None, "entities": []}), [])
 
     def test_text_extracts_addresses_and_preserves_balanced_parentheses(self):
@@ -106,6 +113,34 @@ class UrlTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_expansion_keeps_original_source_and_discovery_reuses_it(self):
+        cursor = Mock(rowcount=1, lastrowid=11)
+        source = SHORT + "?utm_medium=x"
+        cursor.fetchone.side_effect = [None, None, None, (42,)]
+        links = [scraper.TweetLink(source, NEWS + "?utm_source=x")]
+        self.assertEqual(scraper.register_tweet_urls(cursor, 1, links), 1)
+        self.assertEqual(scraper.register_tweet_urls(cursor, 1, [SHORT]), 0)
+
+        inserts = [entry.args[1] for entry in cursor.execute.call_args_list if "INSERT INTO " in entry.args[0]]
+        self.assertEqual(inserts, [
+            (NEWS, scraper._sha256(NEWS)),
+            (1, 11, source, scraper._sha256(SHORT), 11),
+        ])
+
+    def test_known_expansion_consolidates_an_unresolved_short_url(self):
+        cursor = Mock(rowcount=1)
+        cursor.fetchone.side_effect = [(11,), (11, None, None), (22,), (22,)]
+        links = [scraper.TweetLink(SHORT, NEWS)]
+        self.assertEqual(scraper.register_tweet_urls(cursor, 1, links), 1)
+
+        queries = cursor.execute.call_args_list
+        self.assertFalse(any("INSERT INTO web_articles" in entry.args[0] for entry in queries))
+        self.assertIn("article_id = %s", queries[-4].args[0])
+        move, delete = queries[-3:-1]
+        self.assertEqual(move, call("UPDATE tweet_articles SET article_id = %s WHERE article_id = %s", (11, 22)))
+        self.assertIn("NOT EXISTS (SELECT 1 FROM tweet_articles", delete.args[0])
+        self.assertEqual(delete.args[1], (22, 22))
+
     def test_two_article_links_for_one_tweet_and_an_existing_article_for_another(self):
         cursor = Mock(rowcount=1)
         ids = iter((11, 12))
@@ -211,6 +246,43 @@ class ScraperTests(unittest.TestCase):
                     with self.assertRaisesRegex(scraper.ScrapeError, "unsafe_or_unsupported_url"):
                         crawler.scrape_article(SHORT)
                 self.assertEqual(download.call_count, len(responses))
+
+    def test_media_and_x_redirects_are_discarded_before_fetching_the_destination(self):
+        for target in ("https://media.example/foto.png", "https://media.example/video.mp4",
+                       "https://x.com/usuario", "https://twitter.com/usuario/status/100"):
+            with self.subTest(target=target):
+                crawler = self.crawler()
+                responses = [(404, {}, b""), (302, {"Location": target}, b"")]
+                with patch.object(crawler, "_download", side_effect=responses) as download:
+                    with self.assertRaisesRegex(scraper.ScrapeError, "unsafe_or_unsupported_url") as caught:
+                        crawler.scrape_article(SHORT)
+                self.assertTrue(caught.exception.skipped)
+                self.assertEqual(download.call_count, 2)
+
+    def test_tco_robots_can_block_resolution_before_the_shortened_url_is_requested(self):
+        crawler = self.crawler()
+        robots = b"User-agent: *\nDisallow: /\n"
+        with patch.object(crawler, "_download", return_value=(200, {}, robots)) as download:
+            with self.assertRaisesRegex(scraper.ScrapeError, "robots_disallowed"):
+                crawler.scrape_article(SHORT)
+        download.assert_called_once_with("https://t.co/robots.txt", robots=True)
+
+    def test_tco_interstitial_cannot_be_saved_as_the_publisher(self):
+        crawler = self.crawler()
+        responses = [(404, {}, b""), (200, {}, ARTICLE_HTML.encode())]
+        with patch.object(crawler, "_download", side_effect=responses):
+            with self.assertRaisesRegex(scraper.ScrapeError, "unresolved_short_url") as caught:
+                crawler.scrape_article(SHORT)
+        self.assertTrue(caught.exception.skipped)
+
+    def test_repeated_wire_url_is_still_a_redirect_cycle(self):
+        crawler = self.crawler()
+        responses = [(404, {}, b""), (302, {"Location": SHORT}, b"")]
+        with patch.object(crawler, "_download", side_effect=responses) as download:
+            with self.assertRaisesRegex(scraper.ScrapeError, "redirect_cycle") as caught:
+                crawler.scrape_article(SHORT)
+        self.assertTrue(caught.exception.skipped)
+        self.assertEqual(download.call_count, 2)
 
     def test_safe_redirect_checks_destination_robots_before_downloading(self):
         crawler = self.crawler()
@@ -346,6 +418,70 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(move.args[1], (11, 22))
         self.assertIn("NOT EXISTS (SELECT 1 FROM tweet_articles", remove.args[0])
         self.assertEqual(remove.args[1], (22, 22))
+        self.assertIn("domain = %s", self.cursor.execute.call_args_list[-3].args[0])
+        self.assertEqual(self.cursor.execute.call_args_list[-3].args[1][2], "medio.example")
+
+    @patch.dict("os.environ", {"TWITTER_BEARER_TOKEN": "mock-x-token", "INGEST_JOB_TOKEN": "mock-job-token"})
+    def test_shorteners_save_final_html_and_media_domain_after_one_destination_get(self):
+        for short in (SHORT, "https://corto.example/go"):
+            with self.subTest(short=short):
+                parts = urlsplit(short)
+                short_host = parts.hostname
+                final_path = "/noticia/puentes?utm_source=handoff&id=9"
+                replies = {
+                    (short_host, "/robots.txt"): (404, {}, b""),
+                    (short_host, parts.path): (302, {"Location": "?utm_source=handoff"}, b""),
+                    (short_host, parts.path + "?utm_source=handoff"): (
+                        307, {"Location": "//medio.example" + final_path, "Set-Cookie": "tracker=1"}, b"",
+                    ),
+                    ("medio.example", "/robots.txt"): (404, {}, b""),
+                    ("medio.example", final_path): (200, {"Content-Type": "text/html"}, ARTICLE_HTML.encode()),
+                }
+                requests_seen = []
+
+                def send(pool, method, url, headers, **kwargs):
+                    host = headers["Host"]
+                    self.assertEqual(method, "GET")
+                    self.assertEqual(pool.host, "8.8.8.8")
+                    self.assertEqual(pool.assert_hostname, host)
+                    self.assertFalse({"authorization", "proxy-authorization", "cookie"} &
+                                     {name.lower() for name in headers})
+                    self.assertEqual(headers["User-Agent"], scraper.USER_AGENT)
+                    requests_seen.append((host, url))
+                    status, response_headers, body = replies[(host, url)]
+                    return HTTPResponse(body=io.BytesIO(body), headers=response_headers, status=status,
+                                        preload_content=False)
+
+                cursor, conn = Mock(rowcount=1), Mock()
+                cursor.fetchall.side_effect = [[], [(22, short, 0)]]
+                cursor.fetchone.side_effect = [(None, 0, 0), None, None]
+                with patch.object(HTTPSConnectionPool, "urlopen", autospec=True, side_effect=send):
+                    with patch.object(scraper, "_resolve_public_ip", return_value="8.8.8.8"):
+                        with patch.object(scraper.ScrapeSettings, "from_env", return_value=replace(self.settings, domain_delay=0)):
+                            metrics = scraper.process_pending_articles(conn, cursor, time.monotonic())
+
+                self.assertEqual(requests_seen, list(replies))
+                self.assertEqual(metrics["completed"], 1)
+                params = cursor.execute.call_args.args[1]
+                self.assertEqual(params["article_id"], 22)
+                self.assertEqual(params["domain"], "medio.example")
+                self.assertEqual(params["canonical_url"], NEWS)
+                self.assertEqual(params["canonical_hash"], scraper._sha256(NEWS))
+                self.assertIn("cronograma de mantenimiento", params["content"])
+
+    def test_legacy_redirect_loop_can_be_claimed_with_the_existing_attempt_budget(self):
+        self.cursor.fetchall.return_value = [(22, SHORT, 1)]
+        self.assertEqual(scraper.fetch_pending_articles(self.cursor, self.settings), [(22, SHORT, 1)])
+        select = self.cursor.execute.call_args
+        self.assertIn("scraping_error = 'redirect_loop' AND scraping_retry_at IS NULL", select.args[0])
+        self.assertIn("COALESCE(scraping_attempts, 0) < %s", select.args[0])
+        self.assertEqual(select.args[1], (3, self.settings.limit))
+
+        self.assertTrue(scraper._claim_article(self.cursor, 22, 1))
+        update = self.cursor.execute.call_args
+        self.assertIn(scraper.ELIGIBLE_FOR_SCRAPING, update.args[0])
+        self.assertIn("COALESCE(scraping_attempts, 0) + 1", update.args[0])
+        self.assertEqual(update.args[1], (22, 1))
 
     def test_canonical_merge_retains_new_content_when_it_differs(self):
         self.cursor.fetchone.side_effect = [(None, 0, 0), (11, "different", 1)]
@@ -503,7 +639,8 @@ class FlaskIngestionTests(unittest.TestCase):
     @patch.object(main.requests, "get")
     def test_tweet_insert_and_update_keep_text_ml_and_post_url(self, http_get):
         tweet = {"id": "100", "created_at": "2026-11-26T13:00:00Z", "text": "Texto corto", "note_tweet": {
-            "text": "Texto completo " + NEWS,
+            "text": "Texto completo " + SHORT,
+            "entities": {"urls": [{"url": SHORT, "expanded_url": NEWS}]},
         }}
         for exists in (False, True):
             cursor = Mock(rowcount=1)
@@ -516,12 +653,15 @@ class FlaskIngestionTests(unittest.TestCase):
             self.assertEqual(category.call_count, int(not exists))
             statements = [entry.args for entry in cursor.execute.call_args_list]
             _, write = statements[1]
-            self.assertIn("Texto completo " + NEWS, write)
+            self.assertIn("Texto completo " + SHORT, write)
             self.assertIn("https://twitter.com/i/web/status/100", write)
             self.assertIn(datetime(2026, 11, 26, 9), write)
             relation = next(params for sql, params in (entry for entry in statements if len(entry) == 2)
                             if "INSERT INTO tweet_articles" in sql)
-            self.assertEqual(relation[:3], ("100", 11, NEWS))
+            self.assertEqual(relation[:3], ("100", 11, SHORT))
+            article = next(params for sql, params in (entry for entry in statements if len(entry) == 2)
+                           if "INSERT INTO web_articles" in sql)
+            self.assertEqual(article[0], NEWS)
             self.assertFalse(any(sql.startswith("COMMIT") for sql, *_ in statements))
         http_get.assert_not_called()
 

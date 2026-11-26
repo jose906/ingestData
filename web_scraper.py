@@ -117,7 +117,7 @@ def _public_ip(address):
     )
 
 
-def normalize_url(url):
+def normalize_url(url, *, strip_tracking=True):
     if not isinstance(url, str):
         return None
     url = url.strip()
@@ -145,12 +145,15 @@ def normalize_url(url):
                 return None
             host = f"[{address.compressed}]"
 
-        query = []
-        for parameter in parts.query.split("&"):
-            key = unquote_plus(parameter.partition("=")[0]).lower()
-            if not key.startswith("utm_") and key not in TRACKING_KEYS:
-                query.append(parameter)
-        normalized = requote_uri(urlunsplit((parts.scheme, host, parts.path or "/", "&".join(query), "")))
+        query = parts.query
+        if strip_tracking:
+            kept = []
+            for parameter in query.split("&"):
+                key = unquote_plus(parameter.partition("=")[0]).lower()
+                if not key.startswith("utm_") and key not in TRACKING_KEYS:
+                    kept.append(parameter)
+            query = "&".join(kept)
+        normalized = requote_uri(urlunsplit((parts.scheme, host, parts.path or "/", query, "")))
         return normalized if len(normalized) <= MAX_URL_LENGTH else None
     except (UnicodeError, ValueError):
         return None
@@ -202,6 +205,12 @@ def _url_entities(part):
     return [item for item in urls if isinstance(item, dict)] if isinstance(urls, list) else []
 
 
+@dataclass(frozen=True)
+class TweetLink:
+    source_url: str
+    target_url: str
+
+
 def extract_external_urls(tweet):
     note = tweet.get("note_tweet")
     parts = (note, tweet) if isinstance(note, dict) else (tweet,)
@@ -211,26 +220,27 @@ def extract_external_urls(tweet):
         for entity in _url_entities(part):
             candidates = []
             for priority, field in enumerate(("unwound_url", "expanded_url", "url")):
-                source = entity.get(field)
-                normalized = normalize_url(source)
+                target = entity.get(field)
+                normalized = normalize_url(target)
                 if normalized:
-                    candidates.append((priority, normalized, source))
+                    candidates.append((priority, normalized, target))
                     covered.add(normalized)
             if candidates:
-                key = normalize_url(entity.get("url")) or candidates[0][1]
-                if key not in choices or candidates[0][0] < choices[key][0]:
-                    choices[key] = candidates[0]
+                priority, normalized, target = candidates[0]
+                original = entity.get("url")
+                source = normalize_url(original)
+                key = source or normalized
+                if key not in choices or priority < choices[key][0]:
+                    choices[key] = (priority, normalized, TweetLink(original if source else target, target))
 
-    selected = {}
-    for _, normalized, source in choices.values():
-        if _article_target(normalized):
-            selected.setdefault(normalized, source)
+    selected = [link for _, normalized, link in choices.values() if _article_target(normalized)]
     for part in parts:
         for source in extract_urls_from_text(part.get("text")):
             normalized = normalize_url(source)
             if normalized not in covered:
-                selected.setdefault(normalized, source)
-    return list(selected.values())
+                selected.append(TweetLink(source, source))
+                covered.add(normalized)
+    return selected
 
 
 def _sha256(value):
@@ -289,23 +299,69 @@ def _registration_target(cursor, url_hash):
     return None
 
 
+def _delete_empty_article(cursor, article_id):
+    cursor.execute(
+        """
+        DELETE FROM web_articles WHERE article_id = %s
+          AND COALESCE(content, '') = '' AND summary IS NULL AND key_points IS NULL AND summarized_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM tweet_articles WHERE article_id = %s)
+        """,
+        (article_id, article_id),
+    )
+    if not cursor.rowcount:
+        raise RuntimeError("No se pudo retirar el artículo duplicado")
+
+
+def _merge_provisional_source(cursor, source_hash, article_id):
+    cursor.execute(
+        """
+        SELECT article_id FROM web_articles
+        WHERE url_hash = %s AND article_id <> %s
+          AND scraping_status IN ('PENDING', 'FAILED', 'SKIPPED')
+        """,
+        (source_hash, article_id),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return
+    provisional_id = _first_column(row, "article_id")
+    cursor.execute(
+        """
+        SELECT article_id FROM web_articles WHERE article_id = %s
+          AND scraping_status IN ('PENDING', 'FAILED', 'SKIPPED')
+          AND canonical_hash IS NULL AND canonical_url IS NULL AND COALESCE(content, '') = ''
+          AND summary IS NULL AND key_points IS NULL AND summarized_at IS NULL
+        FOR UPDATE
+        """,
+        (provisional_id,),
+    )
+    if cursor.fetchone():
+        cursor.execute("UPDATE tweet_articles SET article_id = %s WHERE article_id = %s", (article_id, provisional_id))
+        _delete_empty_article(cursor, provisional_id)
+
+
 def register_tweet_urls(cursor, tweetid, urls):
     normalized_urls = {}
-    for source in urls:
-        normalized = normalize_url(source)
-        if normalized and _article_target(normalized):
-            normalized_urls.setdefault(normalized, source.strip())
+    for item in urls:
+        link = item if isinstance(item, TweetLink) else TweetLink(item, item)
+        source = normalize_url(link.source_url)
+        target = normalize_url(link.target_url)
+        if source and target and _article_target(target):
+            normalized_urls.setdefault(source, (target, link.source_url.strip()))
 
     registered = 0
-    for url, source in sorted(normalized_urls.items()):
+    for normalized_source, (url, source) in sorted(normalized_urls.items()):
+        source_hash = _sha256(normalized_source)
         url_hash = _sha256(url)
+        has_expansion = source_hash != url_hash
         try:
-            cursor.execute(
-                "SELECT id FROM tweet_articles WHERE tweetid = %s AND source_url_hash = %s",
-                (tweetid, url_hash),
-            )
-            if cursor.fetchone():
-                continue
+            if not has_expansion:
+                cursor.execute(
+                    "SELECT id FROM tweet_articles WHERE tweetid = %s AND source_url_hash = %s",
+                    (tweetid, source_hash),
+                )
+                if cursor.fetchone():
+                    continue
 
             cursor.execute("SAVEPOINT web_article_url")
             try:
@@ -314,26 +370,30 @@ def register_tweet_urls(cursor, tweetid, urls):
                     cursor.execute(
                         """
                         INSERT INTO web_articles
-                            (url, url_hash, domain, scraping_status, summary_status, created_at, updated_at)
-                        VALUES (%s, %s, %s, 'PENDING', 'PENDING', UTC_TIMESTAMP(), UTC_TIMESTAMP())
+                            (url, url_hash, scraping_status, summary_status, created_at, updated_at)
+                        VALUES (%s, %s, 'PENDING', 'PENDING', UTC_TIMESTAMP(), UTC_TIMESTAMP())
                         ON DUPLICATE KEY UPDATE article_id = LAST_INSERT_ID(article_id)
                         """,
-                        (url, url_hash, urlsplit(url).hostname),
+                        (url, url_hash),
                     )
                     article_id = cursor.lastrowid
+                update = "article_id = %s" if has_expansion else "id = id"
+                params = (tweetid, article_id, source, source_hash)
                 cursor.execute(
                     """
                     INSERT INTO tweet_articles (tweetid, article_id, source_url, source_url_hash, created_at)
                     VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
-                    ON DUPLICATE KEY UPDATE id = id
-                    """,
-                    (tweetid, article_id, source, url_hash),
+                    ON DUPLICATE KEY UPDATE
+                    """ + update,
+                    (*params, article_id) if has_expansion else params,
                 )
-                if cursor.rowcount == 1:
-                    registered += 1
-                else:
+                inserted = cursor.rowcount == 1
+                if has_expansion:
+                    _merge_provisional_source(cursor, source_hash, article_id)
+                elif not inserted:
                     # Another transaction registered this link. Discard any newly inserted article.
                     cursor.execute("ROLLBACK TO SAVEPOINT web_article_url")
+                registered += int(inserted)
             except Error as error:
                 if not isinstance(error, DataError) and error.errno not in (1366, 1406):
                     raise
@@ -566,7 +626,7 @@ class ArticleScraper:
             if not allowed:
                 raise ScrapeError("unsafe_or_unsupported_url", skipped=True)
             if url in visited:
-                raise ScrapeError("redirect_loop", skipped=True)
+                raise ScrapeError("redirect_cycle", skipped=True)
             visited.add(url)
             if not robots:
                 self._check_robots(url)
@@ -577,7 +637,7 @@ class ArticleScraper:
                 raise ScrapeError("redirect_limit", status=status, skipped=True)
             location = headers.get("Location", "")
             try:
-                url = normalize_url(urljoin(url, location)) if location else None
+                url = normalize_url(urljoin(url, location), strip_tracking=False) if location else None
             except ValueError:
                 url = None
             if not url:
@@ -610,12 +670,14 @@ class ArticleScraper:
         )
 
     def scrape_article(self, url):
-        normalized = normalize_url(url)
+        normalized = normalize_url(url, strip_tracking=False)
         if not normalized:
             raise ScrapeError("invalid_url", skipped=True)
         final_url, status, headers, body = self._fetch(normalized)
         if status != 200:
             raise _http_error(status, headers)
+        if urlsplit(final_url).hostname == "t.co":
+            raise ScrapeError("unresolved_short_url", status=200, skipped=True)
         _remaining(self.deadline)
         return extract_article(body, final_url, self.settings.min_words)
 
@@ -730,7 +792,7 @@ def extract_article(body, final_url, min_words):
     canonical = _metadata_url(next(iter(canonical_tags), None) or document.url, final_url)
     if (not canonical or not _article_target(canonical)
             or urlsplit(canonical).hostname.removeprefix("www.") != host.removeprefix("www.")):
-        canonical = final_url
+        canonical = normalize_url(final_url)
     language = _metadata_text(language or document.language, 32)
     if language:
         language = language.replace("_", "-")
@@ -781,14 +843,19 @@ def _recover_stale_articles(cursor, settings):
     return cursor.rowcount
 
 
+# Previous versions could mistake redirects that changed only the query for a loop.
+ELIGIBLE_FOR_SCRAPING = """(
+    scraping_status = 'PENDING'
+    OR (scraping_status = 'FAILED' AND scraping_retry_at <= UTC_TIMESTAMP())
+    OR (scraping_status IN ('FAILED', 'SKIPPED') AND scraping_error = 'redirect_loop' AND scraping_retry_at IS NULL)
+)"""
+
+
 def fetch_pending_articles(cursor, settings):
     cursor.execute(
-        """
+        f"""
         SELECT article_id, url, COALESCE(scraping_attempts, 0) FROM web_articles
-        WHERE COALESCE(scraping_attempts, 0) < %s AND (
-            scraping_status = 'PENDING'
-            OR (scraping_status = 'FAILED' AND scraping_retry_at <= UTC_TIMESTAMP())
-        )
+        WHERE COALESCE(scraping_attempts, 0) < %s AND {ELIGIBLE_FOR_SCRAPING}
         ORDER BY article_id LIMIT %s
         """,
         (settings.max_attempts, settings.limit),
@@ -798,15 +865,12 @@ def fetch_pending_articles(cursor, settings):
 
 def _claim_article(cursor, article_id, previous_attempts):
     cursor.execute(
-        """
+        f"""
         UPDATE web_articles
         SET scraping_status = 'PROCESSING', scraping_attempts = COALESCE(scraping_attempts, 0) + 1,
             scraping_started_at = UTC_TIMESTAMP(), scraping_retry_at = NULL, scraping_error = NULL,
             http_status = NULL, updated_at = UTC_TIMESTAMP()
-        WHERE article_id = %s AND COALESCE(scraping_attempts, 0) = %s AND (
-            scraping_status = 'PENDING'
-            OR (scraping_status = 'FAILED' AND scraping_retry_at <= UTC_TIMESTAMP())
-        )
+        WHERE article_id = %s AND COALESCE(scraping_attempts, 0) = %s AND {ELIGIBLE_FOR_SCRAPING}
         """,
         (article_id, previous_attempts),
     )
@@ -902,11 +966,11 @@ def save_article_result(cursor, article_id, attempt, result):
         cursor.execute(
             """
             UPDATE web_articles
-            SET canonical_url = %s, canonical_hash = %s, scraping_status = 'COMPLETED', scraping_error = NULL,
+            SET canonical_url = %s, canonical_hash = %s, domain = %s, scraping_status = 'COMPLETED', scraping_error = NULL,
                 scraping_retry_at = NULL, http_status = 200, updated_at = UTC_TIMESTAMP()
             WHERE article_id = %s
             """,
-            (result["canonical_url"], canonical_hash, owner_id),
+            (result["canonical_url"], canonical_hash, result["domain"], owner_id),
         )
 
     cursor.execute("UPDATE tweet_articles SET article_id = %s WHERE article_id = %s", (owner_id, article_id))
@@ -914,25 +978,16 @@ def save_article_result(cursor, article_id, attempt, result):
         cursor.execute(
             """
             UPDATE web_articles
-            SET canonical_url = %s, canonical_hash = NULL, scraping_status = 'COMPLETED', scraping_error = NULL,
+            SET canonical_url = %s, canonical_hash = NULL, domain = %s, scraping_status = 'COMPLETED', scraping_error = NULL,
                 scraping_retry_at = NULL, http_status = 200, updated_at = UTC_TIMESTAMP()
             WHERE article_id = %s
             """,
-            (result["canonical_url"], article_id),
+            (result["canonical_url"], result["domain"], article_id),
         )
     elif stored_summary or (owner_has_content and owner_content_hash != result["content_hash"]):
         _save_content(cursor, article_id, result, None)
     else:
-        cursor.execute(
-            """
-            DELETE FROM web_articles WHERE article_id = %s
-              AND COALESCE(content, '') = '' AND summary IS NULL AND key_points IS NULL AND summarized_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM tweet_articles WHERE article_id = %s)
-            """,
-            (article_id, article_id),
-        )
-        if not cursor.rowcount:
-            raise RuntimeError("No se pudo retirar el artículo duplicado")
+        _delete_empty_article(cursor, article_id)
     return "duplicates"
 
 
