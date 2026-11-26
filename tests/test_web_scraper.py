@@ -71,7 +71,9 @@ class UrlTests(unittest.TestCase):
         ]}, "text": f"Mira {SHORT} https://t.co/social y {SECOND}. {NEWS}?fbclid=123"}
         unresolved = "https://t.co/unresolved"
         self.assertEqual(scraper.extract_external_urls(tweet), [
-            scraper.TweetLink(SHORT, NEWS), scraper.TweetLink(unresolved, unresolved),
+            scraper.TweetLink(SHORT, NEWS),
+            scraper.TweetLink("https://t.co/social", "https://x.com/user/status/100"),
+            scraper.TweetLink(unresolved, unresolved),
             scraper.TweetLink(SECOND, SECOND),
         ])
 
@@ -111,7 +113,7 @@ class UrlTests(unittest.TestCase):
     def test_text_extracts_addresses_and_preserves_balanced_parentheses(self):
         self.assertEqual(scraper.extract_urls_from_text(
             f"Lee ({NEWS}). También www.diario.example/tema_(Bolivia)! y https://medio.example/foto.JPG?x=1"
-        ), [NEWS, "www.diario.example/tema_(Bolivia)"])
+        ), [NEWS, "www.diario.example/tema_(Bolivia)", "https://medio.example/foto.JPG?x=1"])
 
     def test_text_extracts_article_without_scheme_and_keeps_visible_source(self):
         link = "diario.com.bo/pais/nota?id=2"
@@ -139,6 +141,17 @@ class UrlTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_registers_public_links_for_later_scraping(self):
+        cursor = Mock(rowcount=1, lastrowid=11)
+        cursor.fetchone.return_value = None
+        pdf = "https://medio.example/boletin.pdf"
+        profile = "https://x.com/medio"
+        private_url = "http://169.254.169.254/"
+        self.assertEqual(scraper.register_tweet_urls(cursor, 1, [pdf, profile, private_url]), 2)
+        inserts = [entry.args for entry in cursor.execute.call_args_list if "INSERT INTO web_articles" in entry.args[0]]
+        self.assertCountEqual([params[0] for _, params in inserts], [pdf, profile])
+        self.assertTrue(all("'PENDING'" in sql for sql, _ in inserts))
+
     def test_expansion_keeps_original_source_and_discovery_reuses_it(self):
         cursor = Mock(rowcount=1, lastrowid=11)
         source = SHORT + "?utm_medium=x"
@@ -284,6 +297,16 @@ class ScraperTests(unittest.TestCase):
                         crawler.scrape_article(SHORT)
                 self.assertTrue(caught.exception.skipped)
                 self.assertEqual(download.call_count, 2)
+
+    def test_scraper_discards_saved_profiles_and_files_before_http(self):
+        for url in ("https://x.com/medio", "https://medio.example/boletin.pdf"):
+            with self.subTest(url=url):
+                crawler = self.crawler()
+                with patch.object(crawler, "_download") as download:
+                    with self.assertRaisesRegex(scraper.ScrapeError, "unsafe_or_unsupported_url") as caught:
+                        crawler.scrape_article(url)
+                self.assertTrue(caught.exception.skipped)
+                download.assert_not_called()
 
     def test_tco_robots_can_block_resolution_before_the_shortened_url_is_requested(self):
         crawler = self.crawler()
@@ -785,16 +808,13 @@ class FlaskIngestionTests(unittest.TestCase):
                 cursor.execute.assert_called_with("SELECT GET_LOCK(%s, 0)", (f"netvora_articles_{lock}",))
         self.assertEqual(get_db.call_count, 3)
 
+    @patch.dict("os.environ", {"INGEST_JOB_TOKEN": ""})
     @patch.object(main, "get_db_connection")
-    def test_recovery_requires_a_configured_token_and_head_has_no_side_effects(self, get_db):
-        route = "/articles/recover_urls"
-        with patch.dict("os.environ", {"INGEST_JOB_TOKEN": ""}):
-            self.assertEqual(self.client.get(route).status_code, 503)
-        with patch.dict("os.environ", {"INGEST_JOB_TOKEN": "unit-token"}):
-            self.assertEqual(self.client.head(route, headers={"Authorization": "Bearer unit-token"}).status_code, 204)
+    def test_recovery_head_has_no_side_effects_without_job_token(self, get_db):
+        self.assertEqual(self.client.head("/articles/recover_urls").status_code, 204)
         get_db.assert_not_called()
 
-    @patch.dict("os.environ", {"INGEST_JOB_TOKEN": "unit-token", "TWITTER_BEARER_TOKEN": "x-unit-token"})
+    @patch.dict("os.environ", {"INGEST_JOB_TOKEN": "", "TWITTER_BEARER_TOKEN": "x-unit-token"})
     @patch.object(main, "get_db_connection")
     @patch.object(main.requests, "get")
     def test_recovery_route_uses_one_official_lookup_and_no_ingestion(self, http_get, get_db):
@@ -806,7 +826,7 @@ class FlaskIngestionTests(unittest.TestCase):
         http_get.return_value.headers = CaseInsensitiveDict({"Retry-After": "60"})
         http_get.return_value.json.return_value = {}
         with patch.object(main, "insert_or_update_tweet") as insert:
-            response = self.client.get("/articles/recover_urls", headers={"Authorization": "Bearer unit-token"})
+            response = self.client.get("/articles/recover_urls")
         insert.assert_not_called()
         self.assertEqual(response.status_code, 429)
         self.assertFalse(response.json["ok"])
@@ -895,22 +915,30 @@ class FlaskIngestionTests(unittest.TestCase):
         cursor.fetchone.side_effect = [{"acquired": 1}, {"tweetid": 11}, {"tweetid": 12}, (1,)]
         get_users.return_value = [{"idTweetUser": 5, "TweetUser": "medio", "last_tweetid": "10", "pagination_token": None}]
         other_short = "https://t.co/otra"
+        pdf = "https://medio.example/boletin.pdf"
+        profile = "https://x.com/medio"
+        profile_short = "https://t.co/perfil"
         http_get.return_value.status_code = 200
         http_get.return_value.json.return_value = {
             "data": [
-                {"id": "11", "text": SHORT, "entities": {"urls": [{"url": SHORT, "expanded_url": NEWS}]}},
+                {"id": "11", "text": f"{SHORT} {profile_short} {pdf}", "entities": {"urls": [
+                    {"url": SHORT, "expanded_url": NEWS}, {"url": profile_short, "expanded_url": profile},
+                ]}},
                 {"id": "12", "text": other_short},
             ],
             "meta": {"next_token": "unit-next-page"},
         }
         with patch.object(main, "register_tweet_urls") as register:
-            response = self.client.get("/ingest")
+            with patch.object(scraper.ArticleScraper, "scrape_article") as scrape:
+                response = self.client.get("/ingest")
+        scrape.assert_not_called()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["article_urls"], {
-            "tweets_with_url_entities": 1, "expanded_urls_received": 1, "tweets_only_tco": 1,
+            "tweets_with_url_entities": 1, "expanded_urls_received": 2, "tweets_only_tco": 1,
         })
         self.assertEqual(register.call_args_list, [
-            call(cursor, "11", [scraper.TweetLink(SHORT, NEWS)]),
+            call(cursor, "11", [scraper.TweetLink(SHORT, NEWS), scraper.TweetLink(profile_short, profile),
+                                scraper.TweetLink(pdf, pdf)]),
             call(cursor, "12", [scraper.TweetLink(other_short, other_short)]),
         ])
         http_get.assert_called_once()

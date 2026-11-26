@@ -65,8 +65,6 @@ def authorize_job():
 
     expected = os.getenv("INGEST_JOB_TOKEN")
     if not expected:
-        if request.endpoint == "recover_article_urls_handler":
-            return jsonify(ok=False, error="Configura INGEST_JOB_TOKEN para recuperar URLs"), 503
         return None
     authorization = request.headers.get("Authorization", "")
     if not hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):

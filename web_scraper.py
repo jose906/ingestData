@@ -174,6 +174,13 @@ def _public_target(host):
     return host != "metadata.goog" and not host.endswith((".localhost", ".local", ".internal", ".home.arpa"))
 
 
+def _normalize_public_url(url):
+    normalized = normalize_url(url)
+    if normalized and _public_target(urlsplit(normalized).hostname):
+        return normalized
+    return None
+
+
 def _social_host(host):
     return any(host == domain or host.endswith("." + domain) for domain in SOCIAL_DOMAINS)
 
@@ -202,7 +209,7 @@ def extract_urls_from_text(text):
         for left, right in (("(", ")"), ("[", "]"), ("{", "}")):
             while url.endswith(right) and url.count(right) > url.count(left):
                 url = url[:-1]
-        if is_valid_article_url(url):
+        if _normalize_public_url(url):
             urls.append(url)
     return urls
 
@@ -240,26 +247,24 @@ def extract_external_urls(tweet, *, include_text=True, metrics=None):
             candidates = []
             for priority, field in enumerate(("unwound_url", "expanded_url", "url")):
                 target = entity.get(field)
-                normalized = normalize_url(target)
+                normalized = _normalize_public_url(target)
                 if normalized:
                     short = _tco_key(normalized)
-                    # A known blocked destination also suppresses fallback to the short link.
-                    rank = 2 if short else int(not _article_target(normalized))
-                    candidates.append(((rank, priority), normalized, target))
+                    candidates.append(((bool(short), priority), normalized, target))
                     covered.add(short or normalized)
             if candidates:
                 priority, normalized, target = min(candidates)
                 original = entity.get("url")
-                source = normalize_url(original)
-                if priority[0] == 2 and _tco_key(source):
-                    normalized, target = source, original
+                source = _normalize_public_url(original)
+                if priority[0] and _tco_key(source):
+                    target = original
                 key = _tco_key(source) or source or normalized
-                if any(rank < 2 and field_index < 2 for (rank, field_index), _, _ in candidates):
+                if any(not short and field_index < 2 for (short, field_index), _, _ in candidates):
                     expanded.add(key)
                 if key not in choices or priority < choices[key][0]:
-                    choices[key] = (priority, normalized, TweetLink(original if source else target, target))
+                    choices[key] = (priority, TweetLink(original if source else target, target))
 
-    selected = [link for _, normalized, link in choices.values() if _article_target(normalized)]
+    selected = [link for _, link in choices.values()]
     if include_text:
         for part in parts:
             for source in extract_urls_from_text(part.get("text")):
@@ -378,9 +383,9 @@ def register_tweet_urls(cursor, tweetid, urls):
     normalized_urls = {}
     for item in urls:
         link = item if isinstance(item, TweetLink) else TweetLink(item, item)
-        source = normalize_url(link.source_url)
-        target = normalize_url(link.target_url)
-        if source and target and _article_target(target):
+        source = _normalize_public_url(link.source_url)
+        target = _normalize_public_url(link.target_url)
+        if source and target:
             normalized_urls.setdefault(source, (target, link.source_url.strip(), link.provisional_url))
 
     registered = 0
