@@ -2,6 +2,7 @@ from database import get_db_connection
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from flask import Flask, jsonify, request
 import requests
 import sklearn
@@ -10,6 +11,7 @@ from mysql.connector import Error
 import time
 import hmac
 import base64
+import json
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
 from stance import (
@@ -95,8 +97,51 @@ def close_job_connection(conn, cursor, lock_name, acquired):
 
 # ================== INSERT TWEETS ==================
 
+def get_expanded_urls(tweet):
+    def read_url(value):
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        if any(char.isspace() or not char.isprintable() for char in value):
+            return None
+        try:
+            parts = urlsplit(value)
+            if parts.scheme in ("http", "https") and parts.hostname and parts.port != 0:
+                return value
+        except ValueError:
+            return None
+        return None
+
+    if not isinstance(tweet, dict):
+        return []
+
+    links = {}
+    for part in (tweet, tweet.get("note_tweet")):
+        entities = part.get("entities") if isinstance(part, dict) else None
+        urls = entities.get("urls") if isinstance(entities, dict) else None
+        if not isinstance(urls, list):
+            continue
+
+        for entity in urls:
+            if not isinstance(entity, dict):
+                continue
+            url = read_url(entity.get("url"))
+            unwound = read_url(entity.get("unwound_url"))
+            expanded = unwound or read_url(entity.get("expanded_url"))
+            if not url or not expanded:
+                continue
+
+            previous = links.get(url)
+            if previous is None or (unwound and not previous[1]):
+                links[url] = (expanded, bool(unwound))
+
+    return [{"url": url, "expanded_url": expanded} for url, (expanded, _) in links.items()]
+
+
 def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
     tweet_id = tweet["id"]
+    expanded_urls = get_expanded_urls(tweet)
+    expanded_urls_json = json.dumps(expanded_urls)
     note_tweet = tweet.get("note_tweet") or {}
     text = note_tweet.get("text") or tweet.get("text", "")
     created_at = tweet.get("created_at")
@@ -147,6 +192,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
                 text = %s,
                 created = %s,
                 url = %s,
+                expanded_urls = COALESCE(CAST(%s AS JSON), expanded_urls, JSON_ARRAY()),
                 TweetUser_idTweetUser = %s
             WHERE tweetid = %s
             """,
@@ -154,6 +200,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
                 text,
                 created_dt,
                 url,
+                expanded_urls_json if expanded_urls else None,
                 int(tweetuser_pk_id),
                 tweet_id
             )
@@ -202,6 +249,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
             text,
             created,
             url,
+            expanded_urls,
             sentimiento,
             categoria,
             Lugar,
@@ -214,7 +262,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
         )
         VALUES
         (
-            %s, %s, %s, %s,
+            %s, %s, %s, %s, CAST(%s AS JSON),
             %s, %s,
             %s, %s, %s, %s, %s,
             %s, %s
@@ -225,6 +273,7 @@ def insert_or_update_tweet(cur, tweet, tweetuser_pk_id):
             text,
             created_dt,
             url,
+            expanded_urls_json,
             sentimiento,
             categoria,
             "",
