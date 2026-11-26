@@ -25,6 +25,9 @@ from urllib3.util import Timeout
 LOGGER = logging.getLogger(__name__)
 DISCOVERY_STATE_KEY = "web_articles_last_tweetid"
 DISCOVERY_DAYS = 7
+RECOVERY_STATE_KEY = "web_articles_recover"
+RECOVERY_MAX_ATTEMPTS = 3
+TCO_URL_PREFIXES = ("https://t.co/%", "http://t.co/%")
 USER_AGENT = "NetVoraBot/1.0"
 MAX_URL_LENGTH = 4096
 ROBOTS_MAX_BYTES = 512_000
@@ -210,41 +213,67 @@ def _url_entities(part):
     return [item for item in urls if isinstance(item, dict)] if isinstance(urls, list) else []
 
 
+def _tco_key(normalized_url):
+    parts = urlsplit(normalized_url or "")
+    if parts.hostname == "t.co":
+        return parts._replace(scheme="https").geturl()
+    return None
+
+
 @dataclass(frozen=True)
 class TweetLink:
     source_url: str
     target_url: str
+    provisional_url: str | None = None
 
 
-def extract_external_urls(tweet):
+def extract_external_urls(tweet, *, include_text=True, metrics=None):
     note = tweet.get("note_tweet")
     parts = (note, tweet) if isinstance(note, dict) else (tweet,)
     choices = {}
     covered = set()
+    expanded = set()
+    has_entities = False
     for part in parts:
         for entity in _url_entities(part):
+            has_entities = True
             candidates = []
             for priority, field in enumerate(("unwound_url", "expanded_url", "url")):
                 target = entity.get(field)
                 normalized = normalize_url(target)
                 if normalized:
-                    candidates.append((priority, normalized, target))
-                    covered.add(normalized)
+                    short = _tco_key(normalized)
+                    # A known blocked destination also suppresses fallback to the short link.
+                    rank = 2 if short else int(not _article_target(normalized))
+                    candidates.append(((rank, priority), normalized, target))
+                    covered.add(short or normalized)
             if candidates:
-                priority, normalized, target = candidates[0]
+                priority, normalized, target = min(candidates)
                 original = entity.get("url")
                 source = normalize_url(original)
-                key = source or normalized
+                if priority[0] == 2 and _tco_key(source):
+                    normalized, target = source, original
+                key = _tco_key(source) or source or normalized
+                if any(rank < 2 and field_index < 2 for (rank, field_index), _, _ in candidates):
+                    expanded.add(key)
                 if key not in choices or priority < choices[key][0]:
                     choices[key] = (priority, normalized, TweetLink(original if source else target, target))
 
     selected = [link for _, normalized, link in choices.values() if _article_target(normalized)]
-    for part in parts:
-        for source in extract_urls_from_text(part.get("text")):
-            normalized = normalize_url(source)
-            if normalized not in covered:
-                selected.append(TweetLink(source, source))
-                covered.add(normalized)
+    if include_text:
+        for part in parts:
+            for source in extract_urls_from_text(part.get("text")):
+                normalized = normalize_url(source)
+                key = _tco_key(normalized) or normalized
+                if key not in covered:
+                    selected.append(TweetLink(source, source))
+                    covered.add(key)
+    if metrics is not None:
+        metrics["tweets_with_url_entities"] += int(has_entities)
+        metrics["expanded_urls_received"] += len(expanded)
+        metrics["tweets_only_tco"] += int(bool(selected) and all(
+            _tco_key(normalize_url(link.target_url)) for link in selected
+        ))
     return selected
 
 
@@ -352,10 +381,10 @@ def register_tweet_urls(cursor, tweetid, urls):
         source = normalize_url(link.source_url)
         target = normalize_url(link.target_url)
         if source and target and _article_target(target):
-            normalized_urls.setdefault(source, (target, link.source_url.strip()))
+            normalized_urls.setdefault(source, (target, link.source_url.strip(), link.provisional_url))
 
     registered = 0
-    for normalized_source, (url, source) in sorted(normalized_urls.items()):
+    for normalized_source, (url, source, provisional) in sorted(normalized_urls.items()):
         source_hash = _sha256(normalized_source)
         url_hash = _sha256(url)
         has_expansion = source_hash != url_hash
@@ -395,10 +424,14 @@ def register_tweet_urls(cursor, tweetid, urls):
                 inserted = cursor.rowcount == 1
                 if has_expansion:
                     _merge_provisional_source(cursor, source_hash, article_id)
+                    if provisional and provisional != normalized_source:
+                        short_key = _tco_key(normalized_source)
+                        if short_key and _tco_key(provisional) == short_key:
+                            _merge_provisional_source(cursor, _sha256(provisional), article_id)
                 elif not inserted:
                     # Another transaction registered this link. Discard any newly inserted article.
                     cursor.execute("ROLLBACK TO SAVEPOINT web_article_url")
-                registered += int(inserted)
+                registered += int(inserted or has_expansion)
             except Error as error:
                 if not isinstance(error, DataError) and error.errno not in (1366, 1406):
                     raise
@@ -467,14 +500,164 @@ def discover_historical_urls(conn, cursor, now, started, get_state, set_state):
     return metrics
 
 
+RECOVERABLE_ARTICLE = """(a.url LIKE %s OR a.url LIKE %s)
+    AND a.scraping_status IN ('PENDING', 'FAILED', 'SKIPPED')"""
+
+
+def _recovery_candidates(cursor, limit):
+    cursor.execute(
+        f"""
+        SELECT DISTINCT ta.tweetid, s.v
+        FROM tweet_articles ta JOIN web_articles a ON a.article_id = ta.article_id
+        LEFT JOIN ingest_state s ON s.k = CONCAT(%s, ta.tweetid)
+        WHERE {RECOVERABLE_ARTICLE} AND ta.tweetid > 0
+          AND (s.k IS NULL OR (s.v LIKE 'retry:%'
+               AND CAST(SUBSTRING_INDEX(s.v, ':', -1) AS UNSIGNED) <= UNIX_TIMESTAMP()))
+        ORDER BY ta.tweetid LIMIT %s
+        """,
+        (f"{RECOVERY_STATE_KEY}:", *TCO_URL_PREFIXES, limit),
+    )
+    return {str(tweetid): state for tweetid, state in cursor.fetchall()}
+
+
+def _recovery_sources(cursor, post_ids):
+    if not post_ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(post_ids))
+    cursor.execute(
+        f"""
+        SELECT ta.tweetid, ta.source_url, a.url
+        FROM tweet_articles ta JOIN web_articles a ON a.article_id = ta.article_id
+        WHERE ta.tweetid IN ({placeholders}) AND {RECOVERABLE_ARTICLE}
+        """,
+        (*post_ids, *TCO_URL_PREFIXES),
+    )
+    sources = {}
+    for tweetid, source, provisional in cursor.fetchall():
+        normalized_source = normalize_url(source)
+        short_key = _tco_key(normalized_source)
+        normalized_provisional = normalize_url(provisional)
+        if not short_key:
+            source = provisional
+            normalized_source = normalized_provisional
+            short_key = _tco_key(normalized_source)
+        if short_key:
+            alias = normalized_provisional if normalized_provisional != normalized_source else None
+            sources.setdefault(str(tweetid), {})[source] = (short_key, alias)
+    return sources
+
+
+def _matching_expansions(post, sources):
+    expanded = {}
+    for link in extract_external_urls(post, include_text=False):
+        short_key = _tco_key(normalize_url(link.source_url))
+        if short_key and not _tco_key(normalize_url(link.target_url)):
+            expanded[short_key] = link.target_url
+    return [TweetLink(source, expanded[key], alias) for source, (key, alias) in sources.items() if key in expanded]
+
+
+def _problem_type(problem):
+    kind = problem.get("type") if isinstance(problem, dict) else None
+    return kind.rsplit("/", 1)[-1] if isinstance(kind, str) else None
+
+
+def _lookup_reset_at(headers):
+    now = time.time()
+    reset = headers.get("x-rate-limit-reset") or ""
+    reset = int(reset) if len(reset) <= 12 and reset.isascii() and reset.isdecimal() else 0
+    wait = max(reset - now, _retry_after(headers.get("Retry-After")) or 0)
+    return math.ceil(now + (wait if wait > 0 else 60))
+
+
+def recover_historical_urls(conn, cursor, lookup, get_state, set_state):
+    limit = _setting("RECOVER_LIMIT", 10, 1, 100)
+    metrics = {
+        "batch_limit": limit, "posts_requested": 0, "posts_returned": 0, "posts_recovered": 0,
+        "posts_unavailable": 0, "posts_without_expansion": 0, "posts_retryable": 0,
+        "posts_retry_exhausted": 0, "expanded_urls_recovered": 0,
+    }
+    wait = math.ceil(int(get_state(cursor, RECOVERY_STATE_KEY, "0") or 0) - time.time())
+    if wait > 0:
+        return {**metrics, "status_code": 429, "error": "x_rate_limited", "retry_after_seconds": wait}
+
+    candidates = _recovery_candidates(cursor, limit)
+    conn.commit()
+    if not candidates:
+        return metrics
+
+    metrics["posts_requested"] = len(candidates)
+    try:
+        response = lookup(list(candidates))
+    except requests.RequestException:
+        return {**metrics, "status_code": 502, "error": "x_network_error"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    status = response.status_code
+    metrics["x_status"] = status
+    if status == 402 or _problem_type(payload) == "usage-capped":
+        return {**metrics, "status_code": 402, "error": "x_usage_limit"}
+    if status == 429 or response.headers.get("x-rate-limit-remaining") == "0":
+        reset_at = _lookup_reset_at(response.headers)
+        set_state(cursor, RECOVERY_STATE_KEY, str(reset_at))
+        conn.commit()
+        metrics["retry_after_seconds"] = max(0, math.ceil(reset_at - time.time()))
+        if status == 429:
+            return {**metrics, "status_code": 429, "error": "x_rate_limited"}
+    if status != 200:
+        return {**metrics, "status_code": 502, "error": "x_lookup_failed"}
+    if (not isinstance(payload, dict) or not {"data", "errors"}.intersection(payload)
+            or not isinstance(payload.get("data", []), list) or not isinstance(payload.get("errors", []), list)):
+        return {**metrics, "status_code": 502, "error": "x_invalid_response"}
+
+    posts = {str(post.get("id")): post for post in payload.get("data", [])
+             if isinstance(post, dict) and str(post.get("id")) in candidates}
+    unavailable = {str(problem.get("resource_id") or problem.get("value")) for problem in payload.get("errors", [])
+                   if _problem_type(problem) in {"resource-not-found", "not-authorized-for-resource"}}
+    metrics["posts_returned"] = len(posts)
+    sources = _recovery_sources(cursor, list(posts))
+    for tweetid, previous in candidates.items():
+        state = None
+        if tweetid in posts:
+            links = _matching_expansions(posts[tweetid], sources.get(tweetid, {}))
+            if links:
+                registered = register_tweet_urls(cursor, tweetid, links)
+                metrics["expanded_urls_recovered"] += registered
+                if registered == len(links):
+                    state = "recovered"
+            else:
+                state = "without_expansion"
+        elif tweetid in unavailable:
+            state = "unavailable"
+
+        if state is None:
+            attempt = (int(previous.split(":")[1]) if previous else 0) + 1
+            if attempt >= RECOVERY_MAX_ATTEMPTS:
+                state = "retry_exhausted"
+            else:
+                retry_at = math.ceil(time.time() + 60 * 2 ** (attempt - 1))
+                set_state(cursor, f"{RECOVERY_STATE_KEY}:{tweetid}", f"retry:{attempt}:{retry_at}")
+                metrics["posts_retryable"] += 1
+                continue
+        set_state(cursor, f"{RECOVERY_STATE_KEY}:{tweetid}", state)
+        metrics[f"posts_{state}"] += 1
+
+    conn.commit()
+    return metrics
+
+
 class ScrapeError(Exception):
-    def __init__(self, code, *, status=None, retryable=False, retry_after=None, skipped=False):
+    def __init__(self, code, *, status=None, retryable=False, retry_after=None, skipped=False, domain=None):
         super().__init__(code)
         self.code = code
         self.status = status
         self.retryable = retryable
         self.retry_after = retry_after
         self.skipped = skipped
+        self.domain = domain
 
 
 def _remaining(deadline):
@@ -672,7 +855,7 @@ class ArticleScraper:
             self.robots[origin] = Protego.parse(body.decode("utf-8-sig", errors="replace"))
         rules = self.robots[origin]
         if not rules.can_fetch(url, USER_AGENT):
-            raise ScrapeError("robots_disallowed", skipped=True)
+            raise ScrapeError("robots_disallowed", skipped=True, domain=parts.hostname)
         delay = rules.crawl_delay(USER_AGENT) or 0
         rate = rules.request_rate(USER_AGENT)
         rate_delay = rate.seconds / rate.requests if rate and rate.requests else 0
@@ -870,7 +1053,7 @@ def fetch_pending_articles(cursor, settings):
         WHERE COALESCE(scraping_attempts, 0) < %s AND {ELIGIBLE_FOR_SCRAPING}
         ORDER BY (url LIKE %s OR url LIKE %s), article_id LIMIT %s
         """,
-        (settings.max_attempts, "https://t.co/%", "http://t.co/%", settings.limit),
+        (settings.max_attempts, *TCO_URL_PREFIXES, settings.limit),
     )
     return cursor.fetchall()
 
@@ -900,10 +1083,10 @@ def _save_failure(cursor, article_id, attempt, error, settings):
         """
         UPDATE web_articles
         SET scraping_status = %s, scraping_error = %s, http_status = %s, scraping_retry_at = %s,
-            updated_at = UTC_TIMESTAMP()
+            domain = COALESCE(%s, domain), updated_at = UTC_TIMESTAMP()
         WHERE article_id = %s AND scraping_status = 'PROCESSING' AND scraping_attempts = %s
         """,
-        (status, error.code, error.status, retry_at, article_id, attempt),
+        (status, error.code, error.status, retry_at, error.domain, article_id, attempt),
     )
     if not cursor.rowcount:
         return "superseded"

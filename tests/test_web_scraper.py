@@ -88,6 +88,26 @@ class UrlTests(unittest.TestCase):
         ])
         self.assertEqual(scraper.extract_external_urls({"note_tweet": None, "text": None, "entities": []}), [])
 
+    def test_valid_expansion_wins_over_unwound_short_url_and_covers_text(self):
+        original = SHORT.replace("https:", "http:")
+        tweet = {
+            "text": SHORT,
+            "entities": {"urls": [{"url": original, "unwound_url": SHORT, "expanded_url": NEWS}]},
+            "note_tweet": {"entities": {"urls": [{"url": SHORT, "expanded_url": NEWS}]}},
+        }
+        metrics = dict.fromkeys(("tweets_with_url_entities", "expanded_urls_received", "tweets_only_tco"), 0)
+        links = scraper.extract_external_urls(tweet, metrics=metrics)
+        self.assertEqual(links, [scraper.TweetLink(SHORT, NEWS)])
+        self.assertEqual(metrics, {"tweets_with_url_entities": 1, "expanded_urls_received": 1, "tweets_only_tco": 0})
+        del tweet["note_tweet"]
+        self.assertEqual(scraper.extract_external_urls(tweet), [scraper.TweetLink(original, NEWS)])
+
+    def test_only_tco_keeps_original_short_link_and_counts_it(self):
+        metrics = dict.fromkeys(("tweets_with_url_entities", "expanded_urls_received", "tweets_only_tco"), 0)
+        tweet = {"entities": {"urls": [{"url": SHORT, "unwound_url": "https://t.co/otro"}]}}
+        self.assertEqual(scraper.extract_external_urls(tweet, metrics=metrics), [scraper.TweetLink(SHORT, SHORT)])
+        self.assertEqual(metrics, {"tweets_with_url_entities": 1, "expanded_urls_received": 0, "tweets_only_tco": 1})
+
     def test_text_extracts_addresses_and_preserves_balanced_parentheses(self):
         self.assertEqual(scraper.extract_urls_from_text(
             f"Lee ({NEWS}). También www.diario.example/tema_(Bolivia)! y https://medio.example/foto.JPG?x=1"
@@ -269,9 +289,10 @@ class ScraperTests(unittest.TestCase):
         crawler = self.crawler()
         robots = b"User-agent: *\nDisallow: /\n"
         with patch.object(crawler, "_download", return_value=(200, {}, robots)) as download:
-            with self.assertRaisesRegex(scraper.ScrapeError, "robots_disallowed"):
+            with self.assertRaisesRegex(scraper.ScrapeError, "robots_disallowed") as caught:
                 crawler.scrape_article(SHORT)
         download.assert_called_once_with("https://t.co/robots.txt", robots=True)
+        self.assertEqual(caught.exception.domain, "t.co")
 
     def test_tco_interstitial_cannot_be_saved_as_the_publisher(self):
         crawler = self.crawler()
@@ -297,8 +318,9 @@ class ScraperTests(unittest.TestCase):
                      (200, {}, ARTICLE_HTML.encode())]
         with patch.object(crawler, "_download", side_effect=responses) as download:
             result = crawler.scrape_article(SHORT)
-            with self.assertRaisesRegex(scraper.ScrapeError, "robots_disallowed"):
+            with self.assertRaisesRegex(scraper.ScrapeError, "robots_disallowed") as caught:
                 crawler.scrape_article("https://medio.example/noticia/otra")
+        self.assertEqual(caught.exception.domain, "medio.example")
         self.assertEqual(download.call_args_list, [
             call("https://t.co/robots.txt", robots=True), call(SHORT, robots=False),
             call("https://medio.example/robots.txt", robots=True), call(NEWS, robots=False),
@@ -552,12 +574,14 @@ class QueueTests(unittest.TestCase):
     def test_scraping_metrics_show_why_an_article_did_not_complete(self):
         conn = Mock()
         self.cursor.fetchall.side_effect = [[], [(11, SHORT, 0), (22, NEWS, 0)]]
-        errors = [scraper.ScrapeError("robots_disallowed", skipped=True), scraper.ScrapeError("tls_error")]
+        errors = [scraper.ScrapeError("robots_disallowed", skipped=True, domain="t.co"), scraper.ScrapeError("tls_error")]
         with patch.object(scraper.ArticleScraper, "scrape_article", side_effect=errors):
             with self.assertLogs(scraper.LOGGER, "WARNING"):
                 result = scraper.process_pending_articles(conn, self.cursor, time.monotonic())
         self.assertEqual((result["articles_processed"], result["skipped"], result["failed"]), (2, 1, 1))
         self.assertEqual(result["scraping_errors"], {"robots_disallowed": 1, "tls_error": 1})
+        failures = [entry.args for entry in self.cursor.execute.call_args_list if "domain = COALESCE" in entry.args[0]]
+        self.assertEqual([params[4] for _, params in failures], ["t.co", None])
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -615,6 +639,133 @@ class DiscoveryTests(unittest.TestCase):
         conn.commit.assert_not_called()
 
 
+class RecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = Mock()
+        self.cursor = Mock(rowcount=1, lastrowid=50)
+        self.lookup = Mock()
+        self.get_state = Mock(return_value="0")
+        self.set_state = Mock()
+        self.prefix = scraper.RECOVERY_STATE_KEY
+
+    def respond(self, payload, status=200, headers=None):
+        response = Mock(status_code=status, headers=CaseInsensitiveDict(headers or {}))
+        response.json.return_value = payload
+        self.lookup.return_value = response
+        return response
+
+    def recover(self):
+        return scraper.recover_historical_urls(self.conn, self.cursor, self.lookup, self.get_state, self.set_state)
+
+    @patch.dict("os.environ", {"WEB_ARTICLES_RECOVER_LIMIT": "10"})
+    def test_partial_lookup_uses_only_matching_entities_and_tracks_each_post(self):
+        original = SHORT.replace("https:", "http:") + "?utm_source=x"
+        other_short = "https://t.co/otra"
+        self.cursor.fetchall.side_effect = [
+            [(11, None), (12, None), (13, None), (14, None)],
+            [(11, original, SHORT), (11, other_short, other_short), (13, SHORT, SHORT)],
+        ]
+        response = self.respond({
+            "data": [
+                {"id": "11", "text": SECOND, "note_tweet": {"entities": {"urls": [
+                    {"url": SHORT, "expanded_url": NEWS}, {"url": "https://t.co/ajeno", "expanded_url": SECOND},
+                ]}}},
+                {"id": "13", "text": f"{SHORT} {SECOND}", "entities": {"urls": [{"url": SHORT}]}},
+            ],
+            "errors": [{"type": "https://api.x.com/2/problems/resource-not-found", "resource_id": "12"}],
+        })
+
+        def lookup(ids):
+            self.conn.commit.assert_called_once()
+            return response
+
+        self.lookup.side_effect = lookup
+        with patch.object(scraper, "register_tweet_urls", return_value=1) as register:
+            metrics = self.recover()
+        self.lookup.assert_called_once_with(["11", "12", "13", "14"])
+        register.assert_called_once_with(self.cursor, "11", [scraper.TweetLink(original, NEWS, SHORT)])
+        query, params = self.cursor.execute.call_args_list[0].args
+        self.assertIn("SELECT DISTINCT ta.tweetid", query)
+        self.assertIn("a.scraping_status IN ('PENDING', 'FAILED', 'SKIPPED')", query)
+        self.assertIn("s.k IS NULL OR", query)
+        self.assertEqual(params, (self.prefix + ":", "https://t.co/%", "http://t.co/%", 10))
+        state = {entry.args[1]: entry.args[2] for entry in self.set_state.call_args_list}
+        self.assertEqual(state[f"{self.prefix}:11"], "recovered")
+        self.assertEqual(state[f"{self.prefix}:12"], "unavailable")
+        self.assertEqual(state[f"{self.prefix}:13"], "without_expansion")
+        self.assertRegex(state[f"{self.prefix}:14"], r"^retry:1:\d+$")
+        self.assertEqual((metrics["posts_recovered"], metrics["posts_unavailable"], metrics["posts_retryable"]), (1, 1, 1))
+        self.assertEqual(self.conn.commit.call_count, 2)
+
+    def test_recovery_reassigns_relationships_to_an_existing_article(self):
+        original = SHORT.replace("https:", "http:")
+        self.cursor.fetchall.side_effect = [[(11, None)], [(11, original, SHORT)]]
+        self.cursor.fetchone.side_effect = [(30,), (30, None, None), None, (40,), (40,)]
+        self.cursor.rowcount = 2
+        self.respond({"data": [{"id": "11", "entities": {"urls": [{"url": SHORT, "unwound_url": NEWS}]}}]})
+        metrics = self.recover()
+        self.assertEqual(metrics["expanded_urls_recovered"], 1)
+        self.assertFalse(any("INSERT INTO web_articles" in entry.args[0] for entry in self.cursor.execute.call_args_list))
+        self.cursor.execute.assert_any_call("UPDATE tweet_articles SET article_id = %s WHERE article_id = %s", (30, 40))
+        self.set_state.assert_called_once_with(self.cursor, f"{self.prefix}:11", "recovered")
+
+    def test_recovery_creates_pending_target_and_preserves_protected_provisional(self):
+        self.cursor.fetchall.side_effect = [[(11, None)], [(11, SHORT, SHORT)]]
+        self.cursor.fetchone.side_effect = [None, None, (40,), None]
+        self.respond({"data": [{"id": "11", "entities": {"urls": [{"url": SHORT, "expanded_url": NEWS}]}}]})
+        metrics = self.recover()
+        self.assertEqual(metrics["posts_recovered"], 1)
+        queries = [entry.args for entry in self.cursor.execute.call_args_list]
+        insert = next(args for args in queries if "INSERT INTO web_articles" in args[0])
+        self.assertIn("'PENDING', 'PENDING'", insert[0])
+        self.assertEqual(insert[1][0], NEWS)
+        link = next(args for args in queries if "INSERT INTO tweet_articles" in args[0])
+        self.assertEqual(link[1][:3], ("11", 50, SHORT))
+        guard = next(args[0] for args in queries if "FOR UPDATE" in args[0])
+        self.assertIn("COALESCE(content, '') = ''", guard)
+        self.assertIn("summary IS NULL", guard)
+        self.assertFalse(any("DELETE FROM web_articles" in args[0] for args in queries))
+
+    def test_rate_limits_persist_and_block_another_lookup_until_reset(self):
+        self.cursor.fetchall.return_value = [(11, None)]
+        now = int(time.time())
+        self.respond({}, 429, {"Retry-After": "90", "x-rate-limit-reset": str(now + 200)})
+        metrics = self.recover()
+        self.assertEqual(metrics["status_code"], 429)
+        self.assertGreaterEqual(metrics["retry_after_seconds"], 190)
+        self.set_state.assert_called_once_with(self.cursor, self.prefix, str(now + 200))
+        self.get_state.return_value = str(now + 200)
+        self.assertEqual(self.recover()["posts_requested"], 0)
+        self.lookup.assert_called_once()
+
+    def test_credit_limit_does_not_mark_publications_as_checked(self):
+        self.cursor.fetchall.return_value = [(11, None)]
+        self.respond({"type": "https://api.x.com/2/problems/usage-capped"}, 429)
+        result = self.recover()
+        self.assertEqual((result["status_code"], result["error"]), (402, "x_usage_limit"))
+        self.set_state.assert_not_called()
+
+    def test_request_error_does_not_mark_publications_as_checked(self):
+        self.cursor.fetchall.return_value = [(11, None)]
+        self.lookup.side_effect = requests.Timeout("sensitive data")
+        result = self.recover()
+        self.assertEqual((result["status_code"], result["error"]), (502, "x_network_error"))
+        self.set_state.assert_not_called()
+
+    def test_repeated_partial_omission_exhausts_the_attempt_budget(self):
+        self.cursor.fetchall.return_value = [(11, "retry:2:0")]
+        self.respond({"data": []})
+        self.assertEqual(self.recover()["posts_retry_exhausted"], 1)
+        self.set_state.assert_called_once_with(self.cursor, f"{self.prefix}:11", "retry_exhausted")
+
+    @patch.dict("os.environ", {"WEB_ARTICLES_RECOVER_LIMIT": "100"})
+    def test_recovery_uses_the_configured_maximum_and_skips_empty_lookups(self):
+        self.cursor.fetchall.return_value = []
+        self.assertEqual(self.recover()["batch_limit"], 100)
+        self.assertEqual(self.cursor.execute.call_args.args[1][-1], 100)
+        self.lookup.assert_not_called()
+
+
 class FlaskIngestionTests(unittest.TestCase):
     def setUp(self):
         self.client = main.app.test_client()
@@ -623,7 +774,7 @@ class FlaskIngestionTests(unittest.TestCase):
     @patch.object(main, "get_db_connection")
     def test_endpoints_require_configured_token_and_take_independent_locks(self, get_db):
         cursor = get_db.return_value.cursor.return_value
-        for name in ("discover", "scrape"):
+        for name, lock in (("discover", "discover"), ("scrape", "scrape"), ("recover_urls", "recover")):
             with self.subTest(name=name):
                 route = f"/articles/{name}"
                 self.assertEqual(self.client.get(route).status_code, 401)
@@ -631,8 +782,41 @@ class FlaskIngestionTests(unittest.TestCase):
                 response = self.client.get(route, headers={"Authorization": "Bearer unit-token"})
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.json["busy"])
-                cursor.execute.assert_called_with("SELECT GET_LOCK(%s, 0)", (f"netvora_articles_{name}",))
-        self.assertEqual(get_db.call_count, 2)
+                cursor.execute.assert_called_with("SELECT GET_LOCK(%s, 0)", (f"netvora_articles_{lock}",))
+        self.assertEqual(get_db.call_count, 3)
+
+    @patch.object(main, "get_db_connection")
+    def test_recovery_requires_a_configured_token_and_head_has_no_side_effects(self, get_db):
+        route = "/articles/recover_urls"
+        with patch.dict("os.environ", {"INGEST_JOB_TOKEN": ""}):
+            self.assertEqual(self.client.get(route).status_code, 503)
+        with patch.dict("os.environ", {"INGEST_JOB_TOKEN": "unit-token"}):
+            self.assertEqual(self.client.head(route, headers={"Authorization": "Bearer unit-token"}).status_code, 204)
+        get_db.assert_not_called()
+
+    @patch.dict("os.environ", {"INGEST_JOB_TOKEN": "unit-token", "TWITTER_BEARER_TOKEN": "x-unit-token"})
+    @patch.object(main, "get_db_connection")
+    @patch.object(main.requests, "get")
+    def test_recovery_route_uses_one_official_lookup_and_no_ingestion(self, http_get, get_db):
+        conn = get_db.return_value
+        cursor = conn.cursor.return_value
+        cursor.fetchone.side_effect = [(1,), None, (1,)]
+        cursor.fetchall.return_value = [(101, None), (102, None)]
+        http_get.return_value.status_code = 429
+        http_get.return_value.headers = CaseInsensitiveDict({"Retry-After": "60"})
+        http_get.return_value.json.return_value = {}
+        with patch.object(main, "insert_or_update_tweet") as insert:
+            response = self.client.get("/articles/recover_urls", headers={"Authorization": "Bearer unit-token"})
+        insert.assert_not_called()
+        self.assertEqual(response.status_code, 429)
+        self.assertFalse(response.json["ok"])
+        self.assertEqual(response.json["posts_requested"], 2)
+        self.assertEqual(response.headers["Retry-After"], str(response.json["retry_after_seconds"]))
+        http_get.assert_called_once_with(
+            "https://api.x.com/2/tweets", headers={"Authorization": "Bearer x-unit-token"},
+            params={"ids": "101,102", "tweet.fields": "entities,note_tweet"}, timeout=20, allow_redirects=False,
+        )
+        cursor.execute.assert_called_with("SELECT RELEASE_LOCK(%s)", ("netvora_articles_recover",))
 
     @patch.dict("os.environ", {"INGEST_JOB_TOKEN": ""})
     @patch.object(main, "get_db_connection")
@@ -701,6 +885,36 @@ class FlaskIngestionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         http_get.assert_called_once()
         self.assertEqual(http_get.call_args.kwargs["params"]["tweet.fields"], "created_at,text,entities,author_id,note_tweet")
+
+    @patch.dict("os.environ", {"INGEST_JOB_TOKEN": "", "TWITTER_BEARER_TOKEN": "x-unit-token"})
+    @patch.object(main, "get_db_connection")
+    @patch.object(main, "get_users")
+    @patch.object(main.requests, "get")
+    def test_ingest_reports_url_metrics_from_its_existing_x_request(self, http_get, get_users, get_db):
+        cursor = get_db.return_value.cursor.return_value
+        cursor.fetchone.side_effect = [{"acquired": 1}, {"tweetid": 11}, {"tweetid": 12}, (1,)]
+        get_users.return_value = [{"idTweetUser": 5, "TweetUser": "medio", "last_tweetid": "10", "pagination_token": None}]
+        other_short = "https://t.co/otra"
+        http_get.return_value.status_code = 200
+        http_get.return_value.json.return_value = {
+            "data": [
+                {"id": "11", "text": SHORT, "entities": {"urls": [{"url": SHORT, "expanded_url": NEWS}]}},
+                {"id": "12", "text": other_short},
+            ],
+            "meta": {"next_token": "unit-next-page"},
+        }
+        with patch.object(main, "register_tweet_urls") as register:
+            response = self.client.get("/ingest")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["article_urls"], {
+            "tweets_with_url_entities": 1, "expanded_urls_received": 1, "tweets_only_tco": 1,
+        })
+        self.assertEqual(register.call_args_list, [
+            call(cursor, "11", [scraper.TweetLink(SHORT, NEWS)]),
+            call(cursor, "12", [scraper.TweetLink(other_short, other_short)]),
+        ])
+        http_get.assert_called_once()
+        self.assertEqual(http_get.call_args.args[0], main.TWEETS_URL)
 
     @patch.dict("os.environ", {"INGEST_JOB_TOKEN": ""})
     @patch.object(main, "get_db_connection")
