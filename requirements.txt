@@ -1,5 +1,8 @@
 Flask
 requests
+urllib3
+beautifulsoup4
+protego
 mysql-connector-python
 scikit-learn==1.7.2
 joblib

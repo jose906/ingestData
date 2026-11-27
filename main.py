@@ -1,4 +1,4 @@
-from database import get_db_connection
+from database import get_db_connection, get_state, set_state
 # main.py
 import os
 from datetime import datetime, timedelta, timezone
@@ -14,6 +14,7 @@ import base64
 import json
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
+from scrapping import register_articles, run_scraping, scrape_pending_articles
 from stance import (
     ejecutar_stance_por_target,
     ejecutar_targets_topicos,
@@ -52,7 +53,8 @@ def authorize_job():
     if request.endpoint not in {
         "ingest_handler", "ingest_replies_handler", "reprocess_handler",
         "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
-        "select_topics", "create_topics",
+        "select_topics", "create_topics", "discover_articles_handler",
+        "scrape_articles_handler", "run_articles_handler",
     }:
         return None
 
@@ -873,21 +875,6 @@ def predict():
 
 # ================== REPLIES INGEST ==================
 
-def get_state(cursor, key: str, default=None):
-    cursor.execute("SELECT v FROM ingest_state WHERE k=%s", (key,))
-    row = cursor.fetchone()
-    value = row[0] if row else default
-    if value == "":
-        return default
-    return value
-
-def set_state(cursor, key: str, value):
-    cursor.execute(
-        "INSERT INTO ingest_state (k, v) VALUES (%s, %s) "
-        "ON DUPLICATE KEY UPDATE v=VALUES(v)",
-        (key, value)
-    )
-
 def fetch_recent_root_tweetids(cursor, hours_back: int = 48, cap: int = 5000):
     cursor.execute(
         """
@@ -1422,10 +1409,21 @@ def select_topics():
 
         df_no_asignados, df_asignados = classify_tweets()
         tweets_asignados = int(df_asignados["tweetid"].nunique()) if not df_asignados.empty else 0
+        tweets_analizados = df_asignados.attrs.get("tweets_analizados", 0)
+        tweets_asignados_a_topicos = df_asignados.attrs.get("tweets_asignados_a_topicos", 0)
         return jsonify({
             "ok": True,
             "tweets_no_asignados": len(df_no_asignados),
             "tweets_asignados": tweets_asignados,
+            "tweets_analizados": tweets_analizados,
+            "tweets_asignados_a_topicos": tweets_asignados_a_topicos,
+            "porcentaje_asignado_a_topicos": (
+                round(100 * tweets_asignados_a_topicos / tweets_analizados, 2)
+                if tweets_analizados else 0.0
+            ),
+            "motivos_no_asignados": (
+                df_no_asignados["reason"].value_counts().to_dict() if not df_no_asignados.empty else {}
+            ),
         }), 200
     except Exception:
         app.logger.exception("Falló el trabajo de tópicos")
@@ -1443,6 +1441,32 @@ def create_topics():
     except Exception:
         app.logger.exception("Falló el trabajo de tópicos")
         return jsonify({"ok": False, "error": "Falló el trabajo de tópicos"}), 500
+
+def article_job_response(job):
+    if request.method == "HEAD":
+        return "", 204
+    try:
+        return jsonify(job())
+    except Exception:
+        app.logger.exception("Falló el trabajo de artículos")
+        return jsonify(ok=False, error="Falló el trabajo de artículos"), 500
+
+
+@app.route("/articles/discover", methods=["GET"])
+@app.route("/articles/recover_urls", methods=["GET"])
+def discover_articles_handler():
+    return article_job_response(register_articles)
+
+
+@app.route("/articles/scrape", methods=["GET"])
+def scrape_articles_handler():
+    return article_job_response(scrape_pending_articles)
+
+
+@app.route("/articles/run", methods=["GET"])
+def run_articles_handler():
+    return article_job_response(run_scraping)
+
 
 if __name__ == "__main__":
     # Para correrlo localmente

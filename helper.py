@@ -29,6 +29,10 @@ PALABRAS_COMUNES = frozenset(
     "a al ante con de del el en entre la las lo los o para por se su un una y e".split()
 )
 SIMILITUD_TOPICOS_DUPLICADOS = 0.97
+MODELO_EMBEDDINGS = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+UMBRAL_TOPIC = 0.79
+UMBRAL_CANDIDATO_REFERENCIAS = 0.65
+MARGEN_REFERENCIAS = 0.03
 REFERENCIAS_POR_TOPIC = 150
 CANDIDATOS_REFERENCIAS = 600
 MIN_REFERENCIAS_TOPIC = 10
@@ -53,6 +57,13 @@ def vector_referencia(embedding):
         return None
     norma = np.linalg.norm(vector, axis=0)
     return vector / norma if np.isfinite(norma) and norma > 0 else None
+
+
+def leer_embedding(valor):
+    try:
+        return json.loads(valor)
+    except (TypeError, ValueError):
+        return None
 
 
 def cargar_referencias_topics(abrir_conexion, topic_ids, topics):
@@ -83,12 +94,13 @@ def cargar_referencias_topics(abrir_conexion, topic_ids, topics):
                 JOIN Tweets t ON t.tweetid = tt.tweetid
                 JOIN tweet_embeddings e ON e.tweetid = tt.tweetid
                 WHERE tt.topic_id IN ({placeholders})
+                  AND e.model_name = %s
                   AND t.text IS NOT NULL
                   AND {TOPIC_PRINCIPAL_SQL}
             ) AS ranking
             WHERE rn <= %s
             """,
-            (*ids, CANDIDATOS_REFERENCIAS),
+            (*ids, MODELO_EMBEDDINGS, CANDIDATOS_REFERENCIAS),
         )
         filas = cursor.fetchall()
 
@@ -152,22 +164,127 @@ def puntuar_candidatos(vector, candidatos, referencias):
 
 
 def terminos_evento(texto):
-    normalizado = unicodedata.normalize("NFD", texto.casefold())
+    normalizado = unicodedata.normalize("NFKD", texto).casefold()
     sin_acentos = "".join(c for c in normalizado if not unicodedata.combining(c))
     return frozenset(re.findall(r"[^\W_]+", sin_acentos)) - PALABRAS_COMUNES
+
+
+def es_topico_publicado(topic):
+    nombre = str(topic.get("topic_name") or "").strip()
+    return (
+        bool(topic.get("active"))
+        and bool(nombre)
+        and not nombre.startswith("__")
+        and "NUEVO_CLUSTER" not in nombre.upper()
+    )
 
 
 def eventos_de_topics(topics):
     eventos = {}
     for topic in topics:
-        nombre = str(topic.get("topic_name") or "").strip()
-        # El proceso de nombrado puede eliminar los clusters provisionales.
-        if not topic.get("active") or nombre.startswith("__") or "NUEVO_CLUSTER" in nombre.upper():
+        if not es_topico_publicado(topic):
             continue
-        terminos = terminos_evento(nombre)
+        terminos = terminos_evento(topic["topic_name"])
         if len(terminos) >= 2:
             eventos[int(topic["topic_id"])] = (terminos, topic["embedding"])
     return eventos
+
+
+def clasificar_por_centroide(tweets, topics, cargar_referencias, margen, limite, umbral_secundario):
+    publicados = [topic for topic in topics if es_topico_publicado(topic)]
+    por_dimension = {}
+    for topic in publicados:
+        vector = vector_referencia(topic["embedding"])
+        if vector is not None:
+            por_dimension.setdefault(vector.size, []).append((int(topic["topic_id"]), vector))
+
+    eventos = eventos_de_topics(publicados) if limite > 1 else {}
+    asignados = []
+    pendientes = []
+    grupos = {}
+    for tweet in tweets:
+        vector = vector_referencia(tweet["embedding"])
+        if vector is None:
+            motivo = "missing_embedding" if not tweet.get("has_embedding", True) else "invalid_embedding"
+        elif vector.size not in por_dimension:
+            motivo = "no_compatible_topics" if publicados else "no_topics"
+        else:
+            grupos.setdefault(vector.size, []).append((tweet, vector))
+            continue
+        pendientes.append({**tweet, "reason": motivo})
+
+    referencias = {}
+    for dimension, grupo in grupos.items():
+        ids, vectores = zip(*por_dimension[dimension])
+        matriz = np.stack(vectores).T
+        for inicio in range(0, len(grupo), 500):
+            lote = grupo[inicio:inicio + 500]
+            similitudes = np.clip(np.stack([vector for _, vector in lote]) @ matriz, -1, 1)
+            candidatos_lote = []
+            ids_referencias = set()
+            for fila in similitudes:
+                indices = np.argsort(-fila, kind="stable")
+                primero = float(fila[indices[0]])
+                segundo = float(fila[indices[1]]) if len(ids) > 1 else -1.0
+                directo = primero >= UMBRAL_TOPIC and primero - segundo >= margen
+                principales = [
+                    (ids[i], float(fila[i])) for i in indices[:2] if fila[i] >= UMBRAL_CANDIDATO_REFERENCIAS
+                ]
+                # Revisar referencias si el centroide no decide o si hay dos candidatos fuertes.
+                candidatos = dict(principales) if not directo or segundo >= UMBRAL_TOPIC else {}
+                if eventos and segundo >= umbral_secundario:
+                    candidatos.update(
+                        (ids[i], float(fila[i]))
+                        for i in np.flatnonzero(fila >= umbral_secundario) if ids[i] in eventos
+                    )
+                if directo and set(candidatos) == {ids[indices[0]]}:
+                    candidatos.clear()
+                ids_referencias.update(candidatos)
+                candidatos_lote.append((principales, candidatos, directo, primero))
+
+            faltantes = ids_referencias - referencias.keys()
+            if faltantes:
+                referencias.update(dict.fromkeys(faltantes))
+                referencias.update(cargar_referencias(faltantes, publicados))
+
+            for (tweet, vector), (principales, candidatos, directo, primero) in zip(lote, candidatos_lote):
+                aprobados = puntuar_candidatos(vector, list(candidatos.items()), referencias)
+                ids_principales = {topic_id for topic_id, _ in principales}
+                comprobados = [opcion for opcion in aprobados if opcion["topic_id"] in ids_principales]
+                competidor = None
+                if comprobados:
+                    principal = comprobados[0]["topic_id"], comprobados[0]["similarity"]
+                    if len(comprobados) > 1 and (
+                        comprobados[0]["score_referencias"] - comprobados[1]["score_referencias"] < MARGEN_REFERENCIAS
+                    ):
+                        competidor = comprobados[1]["topic_id"]
+                elif directo:
+                    principal = principales[0]
+                else:
+                    pendientes.append({
+                        **tweet,
+                        "similarity": primero,
+                        "reason": "below_threshold" if primero < UMBRAL_TOPIC else "ambiguous",
+                    })
+                    continue
+
+                destino, _ = principal
+                opciones = [
+                    (opcion["topic_id"], opcion["similarity"])
+                    for opcion in aprobados
+                    if opcion["topic_id"] != destino and opcion["similarity"] >= umbral_secundario
+                ]
+                if competidor is not None:
+                    opciones.sort(key=lambda opcion: opcion[0] != competidor)
+                secundarios = elegir_topics_secundarios(tweet["text"], destino, opciones, eventos, limite - 1)
+                if competidor is not None and competidor not in {topic_id for topic_id, _ in secundarios}:
+                    pendientes.append({**tweet, "similarity": primero, "reason": "ambiguous"})
+                    continue
+                asignados.extend(
+                    {"tweetid": tweet["tweetid"], "topic_id": topic_id, "similarity": similitud}
+                    for topic_id, similitud in [principal, *secundarios]
+                )
+    return asignados, pendientes
 
 
 def elegir_topics_secundarios(texto, principal, opciones, eventos, limite):

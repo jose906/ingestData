@@ -22,3 +22,18 @@ def get_db_connection():
         config["host"] = host
         config["port"] = int(os.getenv("DB_PORT", "3306"))
     return mysql.connector.connect(**config)
+
+
+def get_state(cursor, key: str, default=None):
+    cursor.execute("SELECT v FROM ingest_state WHERE k=%s", (key,))
+    row = cursor.fetchone()
+    value = row[0] if row else default
+    return default if value == "" else value
+
+
+def set_state(cursor, key: str, value):
+    cursor.execute(
+        "INSERT INTO ingest_state (k, v) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE v=VALUES(v)",
+        (key, value)
+    )

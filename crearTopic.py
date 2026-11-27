@@ -8,8 +8,7 @@ from google.genai import types
 import traceback
 
 
-
-
+MIN_TWEETS_PARA_NOMBRE = 4
 
 
 def get_topics(limit_topics=2):
@@ -27,10 +26,20 @@ def get_topics(limit_topics=2):
         tt.similarity,
         tw.text
     FROM (
-        SELECT *
-        FROM topics
-        WHERE topic_name LIKE %s
-        ORDER BY topic_id
+        SELECT candidato.*
+        FROM topics candidato
+        WHERE LOCATE('NUEVO_CLUSTER', UPPER(candidato.topic_name)) > 0
+          AND EXISTS (
+              SELECT 1
+              FROM topic_tweets tt
+              JOIN Tweets tw ON tw.tweetid = tt.tweetid
+              WHERE tt.topic_id = candidato.topic_id
+                AND CHAR_LENGTH(TRIM(REGEXP_REPLACE(tw.text, '[[:space:]]+', ' '))) >= 20
+                AND {TOPIC_PRINCIPAL_SQL}
+              GROUP BY tt.topic_id
+              HAVING COUNT(DISTINCT CAST(TRIM(REGEXP_REPLACE(tw.text, '[[:space:]]+', ' ')) AS BINARY)) >= %s
+          )
+        ORDER BY candidato.topic_id
         LIMIT %s
     ) tp
     JOIN topic_tweets tt
@@ -45,7 +54,7 @@ def get_topics(limit_topics=2):
         return pd.read_sql(
             query,
             connection,
-            params=("%NUEVO_CLUSTER%", limit_topics)
+            params=(MIN_TWEETS_PARA_NOMBRE, limit_topics)
         )
     finally:
         connection.close()
@@ -415,7 +424,7 @@ def insertar_nuevos_topicos(
         seleccionados = seleccionar_tweets(grupo)
         tweets = seleccionados["text"].tolist()
 
-        if len(tweets) < 4:
+        if len(tweets) < MIN_TWEETS_PARA_NOMBRE:
             print(
                 f"Topic {topic_id}: "
                 "pocas publicaciones para nombrar."
