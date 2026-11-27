@@ -11,6 +11,13 @@ import traceback
 MIN_TWEETS_PARA_NOMBRE = 4
 
 
+def get_gemini_client(http_options):
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("Falta GEMINI_API_KEY")
+    return genai.Client(api_key=key, http_options=http_options)
+
+
 def get_topics(limit_topics=2):
     connection = get_db_connection()
 
@@ -209,10 +216,7 @@ PUBLICACIONES:
         ]
     }
 
-    key = os.getenv("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("Falta GEMINI_API_KEY")
-    with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=90000)) as client:
+    with get_gemini_client(types.HttpOptions(timeout=90000)) as client:
         response = client.models.generate_content(
             model=os.getenv("GEMINI_MODEL") or "gemini-3.8-flash",
             contents=prompt,
