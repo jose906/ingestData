@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import time
 import unittest
@@ -364,6 +365,50 @@ class ArticleJobsTest(unittest.TestCase):
         with patch.object(scrapping, "scrape_article", return_value={"error": "EXECUTION_LIMIT"}):
             self.assertTrue(scrapping.scrape_pending_articles()["time_limit_reached"])
         self.assertEqual(self.store.data[1][3]["scraping_status"], "PENDING")
+
+    def test_http_batch_and_socket_limits(self):
+        settings = {
+            "WEB_ARTICLES_DISCOVER_SECONDS": "90", "WEB_ARTICLES_RUN_SECONDS": "120",
+            "WEB_ARTICLES_SCRAPE_SECONDS": "3", "WEB_ARTICLES_TIMEOUT": "15",
+        }
+        register_mock = patch.object(scrapping, "_register_articles", return_value={})
+        scrape_mock = patch.object(scrapping, "_scrape_pending_articles", return_value={})
+        with patch.dict(os.environ, settings), patch.object(scrapping.time, "monotonic", return_value=100):
+            with register_mock as register, scrape_mock as scrape:
+                scrapping.run_scraping(tweet_limit=3, article_limit=2, via_http=True)
+                self.assertEqual(register.call_args.args[2:], (3, 110))
+                self.assertEqual(scrape.call_args.args[2:], (2, 5, 120))
+
+                scrapping.run_scraping(tweet_limit=3, article_limit=2)
+                self.assertEqual(register.call_args.args[2:], (3, 160))
+                self.assertEqual(scrape.call_args.args[2:], (2, 15, 220))
+
+                scrapping.register_articles(limit=3, via_http=True)
+                self.assertEqual(register.call_args.args[2:], (3, 120))
+                scrapping.scrape_pending_articles(limit=2, via_http=True)
+                self.assertEqual(scrape.call_args.args[2:], (2, 5, 103))
+                scrapping.scrape_pending_articles(limit=2, timeout=2, via_http=True)
+                self.assertEqual(scrape.call_args.args[2:], (2, 2, 103))
+
+    def test_http_batch_defers_article_if_socket_timeout_uses_remaining_budget(self):
+        now = 100
+
+        def download(url):
+            nonlocal now
+            if url == OTHER_URL:
+                now = 120
+                raise requests.Timeout
+            return url, HTML
+
+        with patch.object(scrapping.time, "monotonic", side_effect=lambda: now):
+            with patch.object(scrapping, "_download_session", return_value=nullcontext(download)):
+                result = scrapping.run_scraping(tweet_limit=2, via_http=True)
+
+        self.assertTrue(result["time_limit_reached"])
+        self.assertEqual((result["articles_scraped"], result["articles_failed"]), (1, 0))
+        complete, pending = self.store.data[1].values()
+        self.assertEqual(complete["scraping_status"], "COMPLETED")
+        self.assertEqual((pending["scraping_status"], pending["attempts"]), ("PENDING", 0))
 
     def test_retry_limit_and_permanent_error(self):
         def download(url):

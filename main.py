@@ -1446,7 +1446,7 @@ def article_job_response(job):
     if request.method == "HEAD":
         return "", 204
     try:
-        return jsonify(job())
+        return jsonify(job(via_http=True))
     except Exception:
         app.logger.exception("Falló el trabajo de artículos")
         return jsonify(ok=False, error="Falló el trabajo de artículos"), 500

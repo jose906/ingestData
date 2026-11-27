@@ -35,6 +35,9 @@ USER_AGENT = BOT + "/1.0 (+https://netvora.org/)"
 ARTICLE_LOCK = "netvora_articles_scrape"
 STATE_KEY = "web_articles_expanded_cursor"
 REVIEW_INTERVAL = 24 * 60 * 60
+# Leave time for an in-flight socket read and the final MySQL writes under Gunicorn's sync timeout.
+HTTP_JOB_MAX_SECONDS = 20
+HTTP_SOCKET_MAX_SECONDS = 5
 MAX_ATTEMPTS = 3
 MIN_WORDS = 40
 MAX_HTML_BYTES = 2 * 1024 * 1024
@@ -219,6 +222,8 @@ def _register_articles(conn, cursor, limit, deadline):
         "tweets_reviewed", "urls_found", "articles_registered",
         "relations_created", "articles_already_registered",
     ), 0)
+    if time.monotonic() >= deadline:
+        return stats
     saved = json.loads(get_state(cursor, STATE_KEY, "{}"))
     state = {
         "last": 0, "review": 0, "review_until": 0,
@@ -335,6 +340,7 @@ def _open_url(session, url, timeout, deadline):
 
 
 def _read_body(response, max_bytes, deadline):
+    _remaining(deadline)
     header = response.headers.get("Content-Length", "").strip()
     length = None
     if header.isdecimal():
@@ -828,10 +834,11 @@ def _scrape_pending_articles(conn, cursor, limit, timeout, deadline):
             if time.monotonic() >= deadline:
                 break
             result = scrape_article(url, download=download)
-            if result["error"] == "EXECUTION_LIMIT":
+            error = result["error"]
+            if error == "EXECUTION_LIMIT" or (error == "TIMEOUT" and time.monotonic() >= deadline):
                 stats["time_limit_reached"] = True
                 break
-            if result["error"] == "DOMAIN_COOLDOWN":
+            if error == "DOMAIN_COOLDOWN":
                 continue
             try:
                 saved = _save_result(cursor, article_id, previous_status, attempts, result)
@@ -863,8 +870,10 @@ def _setting(name, value, default, maximum):
     return value
 
 
-def _run_job(job, max_seconds):
+def _run_job(job, max_seconds, *, via_http=False):
     started = time.monotonic()
+    if via_http:
+        max_seconds = min(max_seconds, HTTP_JOB_MAX_SECONDS)
     deadline = started + max_seconds
     with closing(get_db_connection()) as conn, closing(conn.cursor()) as cursor:
         cursor.execute("SELECT GET_LOCK(%s, 0)", (ARTICLE_LOCK,))
@@ -880,36 +889,45 @@ def _run_job(job, max_seconds):
     }
 
 
-def register_articles(limit=None, *, max_seconds=None):
+def register_articles(limit=None, *, max_seconds=None, via_http=False):
     limit = _setting("DISCOVER_LIMIT", limit, 200, 1000)
     seconds = _setting("DISCOVER_SECONDS", max_seconds, 20, 240)
-    return _run_job(lambda conn, cursor, deadline: _register_articles(conn, cursor, limit, deadline), seconds)
-
-
-def scrape_pending_articles(limit=None, *, max_seconds=None, timeout=None):
-    limit = _setting("SCRAPE_LIMIT", limit, 20, 100)
-    seconds = _setting("SCRAPE_SECONDS", max_seconds, 60, 240)
-    timeout = _setting("TIMEOUT", timeout, 10, 60)
     return _run_job(
-        lambda conn, cursor, deadline: _scrape_pending_articles(conn, cursor, limit, timeout, deadline),
-        seconds,
+        lambda conn, cursor, deadline: _register_articles(conn, cursor, limit, deadline),
+        seconds, via_http=via_http,
     )
 
 
-def run_scraping(tweet_limit=None, article_limit=None, *, max_seconds=None, timeout=None):
+def scrape_pending_articles(limit=None, *, max_seconds=None, timeout=None, via_http=False):
+    limit = _setting("SCRAPE_LIMIT", limit, 20, 100)
+    seconds = _setting("SCRAPE_SECONDS", max_seconds, 60, 240)
+    timeout = _setting("TIMEOUT", timeout, 10, 60)
+    if via_http:
+        timeout = min(timeout, HTTP_SOCKET_MAX_SECONDS)
+    return _run_job(
+        lambda conn, cursor, deadline: _scrape_pending_articles(conn, cursor, limit, timeout, deadline),
+        seconds, via_http=via_http,
+    )
+
+
+def run_scraping(tweet_limit=None, article_limit=None, *, max_seconds=None, timeout=None, via_http=False):
     tweet_limit = _setting("DISCOVER_LIMIT", tweet_limit, 200, 1000)
     article_limit = _setting("SCRAPE_LIMIT", article_limit, 20, 100)
     seconds = _setting("RUN_SECONDS", max_seconds, 60, 240)
     registration_seconds = _setting("DISCOVER_SECONDS", None, 20, 240)
     timeout = _setting("TIMEOUT", timeout, 10, 60)
+    if via_http:
+        timeout = min(timeout, HTTP_SOCKET_MAX_SECONDS)
 
     def run(conn, cursor, deadline):
-        register_until = min(deadline, time.monotonic() + min(registration_seconds, seconds / 2))
+        registration_started = time.monotonic()
+        registration_budget = min(registration_seconds, (deadline - registration_started) / 2)
+        register_until = registration_started + registration_budget
         stats = _register_articles(conn, cursor, tweet_limit, register_until)
         stats.update(_scrape_pending_articles(conn, cursor, article_limit, timeout, deadline))
         return stats
 
-    return _run_job(run, seconds)
+    return _run_job(run, seconds, via_http=via_http)
 
 
 if __name__ == "__main__":
