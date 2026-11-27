@@ -190,7 +190,7 @@ def eventos_de_topics(topics):
     return eventos
 
 
-def clasificar_por_centroide(tweets, topics, cargar_referencias, margen, limite=1, umbral_secundario=0.84):
+def clasificar_por_centroide(tweets, topics, cargar_referencias, margen, limite, umbral_secundario):
     publicados = [topic for topic in topics if es_topico_publicado(topic)]
     por_dimension = {}
     for topic in publicados:
@@ -198,7 +198,7 @@ def clasificar_por_centroide(tweets, topics, cargar_referencias, margen, limite=
         if vector is not None:
             por_dimension.setdefault(vector.size, []).append((int(topic["topic_id"]), vector))
 
-    eventos = eventos_de_topics(publicados) if cargar_referencias is not None and limite > 1 else {}
+    eventos = eventos_de_topics(publicados) if limite > 1 else {}
     asignados = []
     pendientes = []
     grupos = {}
@@ -231,9 +231,7 @@ def clasificar_por_centroide(tweets, topics, cargar_referencias, margen, limite=
                     (ids[i], float(fila[i])) for i in indices[:2] if fila[i] >= UMBRAL_CANDIDATO_REFERENCIAS
                 ]
                 # Revisar referencias si el centroide no decide o si hay dos candidatos fuertes.
-                candidatos = {}
-                if cargar_referencias is not None and (not directo or segundo >= UMBRAL_TOPIC):
-                    candidatos = dict(principales)
+                candidatos = dict(principales) if not directo or segundo >= UMBRAL_TOPIC else {}
                 if eventos and segundo >= umbral_secundario:
                     candidatos.update(
                         (ids[i], float(fila[i]))

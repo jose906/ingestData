@@ -1420,22 +1420,10 @@ def select_topics():
         acquired = True
 
         df_no_asignados, df_asignados = classify_tweets()
-        tweets_asignados = int(df_asignados["tweetid"].nunique()) if not df_asignados.empty else 0
-        tweets_analizados = df_asignados.attrs.get("tweets_analizados", 0)
-        tweets_asignados_a_topicos = df_asignados.attrs.get("tweets_asignados_a_topicos", 0)
         return jsonify({
             "ok": True,
             "tweets_no_asignados": len(df_no_asignados),
-            "tweets_asignados": tweets_asignados,
-            "tweets_analizados": tweets_analizados,
-            "tweets_asignados_a_topicos": tweets_asignados_a_topicos,
-            "porcentaje_asignado_a_topicos": (
-                round(100 * tweets_asignados_a_topicos / tweets_analizados, 2)
-                if tweets_analizados else 0.0
-            ),
-            "motivos_no_asignados": (
-                df_no_asignados["reason"].value_counts().to_dict() if not df_no_asignados.empty else {}
-            ),
+            "tweets_asignados": len(df_asignados),
         }), 200
     except Exception:
         app.logger.exception("Falló el trabajo de tópicos")

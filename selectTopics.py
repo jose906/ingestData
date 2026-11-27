@@ -1,14 +1,15 @@
 from contextlib import closing
+from database import get_db_connection
 import os
 import json
 import pandas as pd
 import numpy as np
 from collections import Counter
-from database import get_db_connection
-from helper import leer_embedding
 import helper
+from mysql.connector.errors import IntegrityError
 
 
+UMBRAL = 0.8
 MARGEN_MINIMO = float(os.getenv("TOPIC_MIN_MARGIN", "0.03"))
 UMBRAL_CENTROIDE = float(os.getenv("TOPIC_CENTROID_MIN_SIMILARITY", "0.85"))
 
@@ -21,6 +22,13 @@ TOPICS_ESPECIALES = [
     "__PROGRAMACION__",
     "__RESUMEN__"
 ]
+
+
+def leer_embedding(valor):
+    try:
+        return json.loads(valor)
+    except (TypeError, ValueError):
+        return None
 
 
 def vector_unitario(embedding):
@@ -44,7 +52,7 @@ def get_topic_embeddings():
         placeholders = ",".join(["%s"] * len(TOPICS_ESPECIALES))
 
         query = f"""
-            SELECT te.topic_id, te.embedding_vector, t.topic_name, t.active
+            SELECT te.topic_id, te.embedding_vector
             FROM topic_embeddings te
             JOIN topics t
                 ON t.topic_id = te.topic_id
@@ -60,9 +68,7 @@ def get_topic_embeddings():
     for row in results:
         topics.append({
             "topic_id": row["topic_id"],
-            "embedding": leer_embedding(row["embedding_vector"]),
-            "topic_name": row["topic_name"],
-            "active": row["active"],
+            "embedding": leer_embedding(row["embedding_vector"])
         })
 
     return topics
@@ -74,19 +80,17 @@ def get_tweet_embedding():
             SELECT
                 t.tweetid,
                 t.text,
-                e.tweetid AS embedding_tweetid,
                 e.embedding_vector
             FROM Tweets t
-            LEFT JOIN tweet_embeddings e
+            JOIN tweet_embeddings e
                 ON t.tweetid = e.tweetid
-                AND e.model_name = %s
             LEFT JOIN topic_tweets tt
                 ON t.tweetid = tt.tweetid
             WHERE tt.tweetid IS NULL
               AND t.created >= CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '-04:00') - INTERVAL 14 DAY
         """
 
-        cursor.execute(query, (helper.MODELO_EMBEDDINGS,))
+        cursor.execute(query)
         results = cursor.fetchall()
 
     tweets = []
@@ -94,9 +98,8 @@ def get_tweet_embedding():
     for row in results:
         tweets.append({
             "tweetid": row["tweetid"],
-            "text": row["text"],
-            "embedding": leer_embedding(row["embedding_vector"]),
-            "has_embedding": row["embedding_tweetid"] is not None,
+             "text": row["text"],
+            "embedding": leer_embedding(row["embedding_vector"])
         })
 
     return tweets
@@ -124,26 +127,156 @@ def get_especial_topics():
 
 
 def insert_tweets_topic(df, ids_especiales):
+
     if df is None or df.empty:
+        print("No hay tweets para insertar")
         return set()
 
-    filas = [
-        (int(fila.topic_id), int(fila.tweetid), float(fila.similarity))
-        for fila in df.itertuples(index=False)
-    ]
-    with closing(get_db_connection()) as connection, closing(connection.cursor(dictionary=True)) as cursor:
-        try:
-            nuevas = helper.guardar_relaciones_nuevas(cursor, filas)
-            principales = helper.topics_principales(nuevas) - set(ids_especiales)
-            for topic_id in sorted(principales):
-                recalcular_centroide_topic(cursor, topic_id)
-            connection.commit()
-        except Exception:
+    connection = None
+    cursor = None
+
+    nuevos_por_topic = Counter()
+    duplicados = 0
+    tweets_insertados = set()
+
+    ids_especiales = set(
+        int(x) for x in ids_especiales
+    )
+
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+
+        # Evitar duplicados dentro del lote
+        df = df.drop_duplicates(
+            subset="tweetid"
+        ).copy()
+
+        insert_query = """
+            INSERT INTO topic_tweets (
+                topic_id,
+                tweetid,
+                similarity,
+                assigned_at
+            )
+            VALUES (%s, %s, %s, NOW())
+        """
+
+        # 1. Insertar solamente tweets nuevos
+        for fila in df.itertuples(index=False):
+
+            topic_id = int(fila.topic_id)
+            tweetid = int(fila.tweetid)
+            similarity = float(fila.similarity)
+
+            if not np.isfinite(similarity):
+                raise ValueError(
+                    f"Similitud inválida para tweet {tweetid}"
+                )
+
+            try:
+                cursor.execute(
+                    insert_query,
+                    (
+                        topic_id,
+                        tweetid,
+                        similarity
+                    )
+                )
+
+                nuevos_por_topic[topic_id] += 1
+                tweets_insertados.add(tweetid)
+
+            except IntegrityError as error:
+
+                # Código MySQL 1062: clave duplicada.
+                # No cambiar un tweet ya asignado.
+                if error.errno == 1062:
+                    duplicados += 1
+                    continue
+
+                raise
+
+        # 2. Actualizar solamente tópicos afectados
+        update_query = """
+            UPDATE topics
+            SET
+                total_tweets = (
+                    SELECT COUNT(*)
+                    FROM topic_tweets tt
+                    WHERE tt.topic_id = topics.topic_id
+                ),
+                last_seen = NOW()
+            WHERE topic_id = %s
+        """
+
+        for topic_id in nuevos_por_topic.keys():
+
+            cursor.execute(
+                update_query,
+                (int(topic_id),)
+            )
+
+        # 3. Recalcular centroides robustos
+        # solamente si ingresaron nuevos tweets
+        for topic_id in sorted(nuevos_por_topic):
+
+            if topic_id in ids_especiales:
+                continue
+
+            recalcular_centroide_topic(
+                cursor,
+                topic_id
+            )
+
+        # 4. Confirmar todos los cambios
+        connection.commit()
+
+        print("\n" + "=" * 60)
+        print("RESULTADOS DE GUARDADO")
+        print("=" * 60)
+
+        print(
+            "Tweets nuevos insertados:",
+            sum(nuevos_por_topic.values())
+        )
+
+        print("Duplicados omitidos:", duplicados)
+
+        print(
+            "Tópicos afectados:",
+            len(nuevos_por_topic)
+        )
+
+        print(
+            "Centroides recalculados solicitados:",
+            len(
+                set(nuevos_por_topic)
+                - ids_especiales
+            )
+        )
+
+        return tweets_insertados
+
+    except Exception as error:
+
+        if connection is not None:
             connection.rollback()
-            raise
 
-    return {tweetid for _, tweetid, _ in nuevas}
+        print(
+            f"Error guardando asignaciones: {error}"
+        )
 
+        raise
+
+    finally:
+
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            if connection is not None:
+                connection.close()
 
 def recalcular_centroide_topic(cursor, topic_id):
 
@@ -169,9 +302,9 @@ def recalcular_centroide_topic(cursor, topic_id):
             print(f"Topic {topic_id}: centroide anterior inválido")
             return False
 
-    # 2. Obtener asignaciones principales de alta similitud.
+    # 2. Obtener tweets con asignaciones de alta similitud.
     cursor.execute(
-        f"""
+        """
         SELECT
             tt.tweetid,
             t.text,
@@ -181,11 +314,10 @@ def recalcular_centroide_topic(cursor, topic_id):
             ON t.tweetid = tt.tweetid
         JOIN tweet_embeddings e
             ON e.tweetid = tt.tweetid
-        WHERE tt.topic_id = %s AND tt.similarity >= %s AND e.model_name = %s
-          AND {helper.TOPIC_PRINCIPAL_SQL}
+        WHERE tt.topic_id = %s AND tt.similarity >= %s
         ORDER BY tt.tweetid
         """,
-        (topic_id, UMBRAL_CENTROIDE, helper.MODELO_EMBEDDINGS)
+        (topic_id, UMBRAL_CENTROIDE)
     )
 
     resultados = cursor.fetchall()
@@ -408,6 +540,63 @@ def calcular_centroide_robusto(grupo, dimension=None):
     )
 
 
+def clasificar_por_centroide(tweets, topics, asignados, pendientes):
+    topicos_por_dimension = {}
+    for topic in topics:
+        vector = vector_unitario(topic["embedding"])
+        if vector is not None:
+            topicos_por_dimension.setdefault(vector.size, []).append(
+                (int(topic["topic_id"]), vector)
+            )
+
+    tweets_por_dimension = {}
+    for tweet in tweets:
+        vector = vector_unitario(tweet["embedding"])
+        if vector is None:
+            pendientes.append({**tweet, "similarity": 0.0, "reason": "invalid_embedding"})
+        elif vector.size not in topicos_por_dimension:
+            reason = "no_compatible_topics" if topics else "no_topics"
+            pendientes.append({**tweet, "similarity": 0.0, "reason": reason})
+        else:
+            tweets_por_dimension.setdefault(vector.size, []).append((tweet, vector))
+
+    batch_size = 1000
+    for dimension, grupo in tweets_por_dimension.items():
+        topic_ids, vectores = zip(*topicos_por_dimension[dimension])
+        matriz_topics = np.stack(vectores).T
+        for start in range(0, len(grupo), batch_size):
+            lote = grupo[start:start + batch_size]
+            similares = np.stack([vector for _, vector in lote]) @ matriz_topics
+            mejores = similares.argmax(axis=1)
+            for fila, ((tweet, _), mejor) in enumerate(zip(lote, mejores)):
+                score = float(np.clip(similares[fila, mejor], -1.0, 1.0))
+                topic_id = topic_ids[mejor]
+                segundo_id = segundo_score = margen = None
+                if len(topic_ids) > 1:
+                    similares[fila, mejor] = -np.inf
+                    segundo = similares[fila].argmax()
+                    segundo_id = topic_ids[segundo]
+                    segundo_score = float(np.clip(similares[fila, segundo], -1.0, 1.0))
+                    margen = score - segundo_score
+
+                if score >= UMBRAL and (margen is None or margen >= MARGEN_MINIMO):
+                    asignados.append({
+                        "tweetid": tweet["tweetid"],
+                        "topic_id": topic_id,
+                        "similarity": score,
+                    })
+                else:
+                    pendientes.append({
+                        **tweet,
+                        "similarity": score,
+                        "candidate_topic_id": topic_id,
+                        "second_topic_id": segundo_id,
+                        "second_similarity": segundo_score,
+                        "margin": margen,
+                        "reason": "below_threshold" if score < UMBRAL else "ambiguous",
+                    })
+
+
 def classify_tweets(guardar=True):
     tweets = get_tweet_embedding()
     if not tweets:
@@ -415,6 +604,7 @@ def classify_tweets(guardar=True):
 
     especiales = get_especial_topics()
     asignados = []
+    pendientes = []
     tweets_normales = []
 
     for tweet in tweets:
@@ -429,38 +619,20 @@ def classify_tweets(guardar=True):
                 "similarity": 1.0,
             })
 
-    pendientes = []
     if tweets_normales:
-        clasificados, pendientes = helper.clasificar_por_centroide(
-            tweets_normales,
-            get_topic_embeddings(),
-            cargar_referencias=None,
-            margen=MARGEN_MINIMO,
+        clasificar_por_centroide(
+            tweets_normales, get_topic_embeddings(), asignados, pendientes
         )
-        asignados.extend(clasificados)
 
     df_asignados = pd.DataFrame(asignados, columns=["tweetid", "topic_id", "similarity"])
-    df_asignados = df_asignados.drop_duplicates(subset=["tweetid", "topic_id"])
-    ids_asignados = set(df_asignados["tweetid"])
-    df_pendientes = pd.DataFrame(
-        tweet for tweet in pendientes if tweet["tweetid"] not in ids_asignados
-    )
+    df_pendientes = pd.DataFrame(pendientes)
     if guardar and not df_asignados.empty:
+        df_asignados = df_asignados.drop_duplicates(subset="tweetid")
         insertados = insert_tweets_topic(df_asignados, especiales.values())
         df_asignados = df_asignados[df_asignados["tweetid"].map(int).isin(insertados)]
 
-    total = len(tweets)
-    asignados_unicos = int(df_asignados["tweetid"].nunique())
-    especiales_unicos = int(df_asignados.loc[
-        df_asignados["topic_id"].isin(especiales.values()), "tweetid"
-    ].nunique())
-    df_asignados.attrs.update(
-        tweets_analizados=total,
-        tweets_asignados_a_topicos=asignados_unicos - especiales_unicos,
-    )
-    print("Tweets analizados:", total)
-    print("Tweets insertados:" if guardar else "Tweets asignables:", asignados_unicos)
-    print("Asociaciones guardadas:" if guardar else "Asociaciones propuestas:", len(df_asignados))
+    print("Tweets analizados:", len(tweets))
+    print("Tweets insertados:" if guardar else "Asignaciones propuestas:", len(df_asignados))
     if not df_pendientes.empty:
         print("Motivos de rechazo:", dict(Counter(df_pendientes["reason"])))
 
