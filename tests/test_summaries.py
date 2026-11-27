@@ -497,31 +497,39 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summaries.generate_topic_summary(1, DAY, DAY)["error"], "BUSY")
         self.assertFalse(self.requests)
 
-    def test_flask_endpoints_use_existing_token_and_return_job_results(self):
+    def test_flask_summary_endpoints_and_token_requirements(self):
         from main import app
 
         client = app.test_client()
         with patch.dict(os.environ, {"INGEST_JOB_TOKEN": ""}):
-            self.assertEqual(client.post("/summaries/articles").status_code, 503)
+            self.assertEqual(client.post("/summaries/articles").status_code, 200)
+            self.assertEqual(client.post("/summaries/topic").status_code, 503)
             self.assertEqual(client.head("/articles/discover").status_code, 204)
 
         self.store.articles[2] = article(2)
         with patch.dict(os.environ, {"INGEST_JOB_TOKEN": "summary-test-token"}):
             headers = {"Authorization": "Bearer summary-test-token"}
-            self.assertEqual(client.post("/summaries/articles").status_code, 401)
+            self.assertEqual(client.get("/summaries/articles").status_code, 405)
             self.assertEqual(client.get("/summaries/topic", headers=headers).status_code, 405)
+            self.assertEqual(client.head("/articles/discover").status_code, 401)
             invalid = client.post("/summaries/general", json={"start_date": DAY}, headers=headers)
             self.assertEqual(invalid.status_code, 400)
             self.assertFalse(self.requests)
+
+            response = client.post("/summaries/articles", json={"limit": 1})
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(response.json["summaries_generated"], 1)
+
             period = {"start_date": DAY, "end_date": DAY}
             for path, payload in (
-                ("articles", {"limit": 1}),
                 ("topic", {"topic_id": 1, **period}),
                 ("category", {"category": "Política", **period}),
                 ("general", period),
                 ("custom", {"filters": {"categories": ["Economía"], **period}}),
             ):
-                response = client.post("/summaries/" + path, json=payload, headers=headers)
+                endpoint = "/summaries/" + path
+                self.assertEqual(client.post(endpoint, json=payload).status_code, 401, endpoint)
+                response = client.post(endpoint, json=payload, headers=headers)
                 self.assertEqual(response.status_code, 200, response.json)
                 self.assertTrue(response.json["ok"])
             response = client.post("/summaries/general", json=period, headers=headers)

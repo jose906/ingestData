@@ -52,15 +52,15 @@ BOLIVIA_TZ = timezone(timedelta(hours=-4))
 
 app = Flask(__name__)
 
-SUMMARY_ENDPOINTS = {
-    "summary_articles_handler", "summary_topic_handler", "summary_category_handler",
+PROTECTED_SUMMARY_ENDPOINTS = {
+    "summary_topic_handler", "summary_category_handler",
     "summary_general_handler", "summary_custom_handler",
 }
 
 @app.before_request
 def authorize_job():
-    summary_endpoint = request.endpoint in SUMMARY_ENDPOINTS
-    if not summary_endpoint and request.endpoint not in {
+    protected_summary = request.endpoint in PROTECTED_SUMMARY_ENDPOINTS
+    if not protected_summary and request.endpoint not in {
         "ingest_handler", "ingest_replies_handler", "reprocess_handler",
         "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
         "select_topics", "create_topics", "discover_articles_handler",
@@ -70,7 +70,7 @@ def authorize_job():
 
     expected = os.getenv("INGEST_JOB_TOKEN")
     if not expected:
-        if summary_endpoint:
+        if protected_summary:
             return jsonify(ok=False, error="Falta configurar INGEST_JOB_TOKEN"), 503
         return None
     authorization = request.headers.get("Authorization", "")
@@ -1505,7 +1505,7 @@ def summary_job_response(job, required=(), optional=()):
         return jsonify(ok=False, error="SUMMARY_ERROR"), 500
 
 
-@app.post("/summaries/articles")
+@app.get("/summaries/articles")
 def summary_articles_handler():
     return summary_job_response(generate_pending_article_summaries, optional=("limit",))
 
