@@ -506,30 +506,34 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summaries.generate_topic_summary(1, DAY, DAY)["error"], "BUSY")
         self.assertFalse(self.requests)
 
-    def test_flask_summary_endpoints_and_token_requirements(self):
+    def test_flask_summary_endpoints_without_job_token(self):
         from main import app
 
         client = app.test_client()
+        period = {"start_date": DAY, "end_date": DAY}
         with patch.dict(os.environ, {"INGEST_JOB_TOKEN": ""}):
             self.assertEqual(client.get("/summaries/articles").status_code, 200)
-            self.assertEqual(client.post("/summaries/topic").status_code, 503)
+            response = client.post("/summaries/general", json=period)
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertTrue(response.json["ok"])
             self.assertEqual(client.head("/articles/discover").status_code, 204)
 
         self.store.articles[2] = article(2)
-        with patch.dict(os.environ, {"INGEST_JOB_TOKEN": "summary-test-token"}):
-            headers = {"Authorization": "Bearer summary-test-token"}
+        with patch.dict(os.environ, {"INGEST_JOB_TOKEN": "ingest-test-token"}):
             self.assertEqual(client.post("/summaries/articles").status_code, 405)
-            self.assertEqual(client.get("/summaries/topic", headers=headers).status_code, 405)
+            self.assertEqual(client.get("/summaries/topic").status_code, 405)
             self.assertEqual(client.head("/articles/discover").status_code, 401)
-            invalid = client.post("/summaries/general", json={"start_date": DAY}, headers=headers)
+            headers = {"Authorization": "Bearer ingest-test-token"}
+            self.assertEqual(client.head("/articles/discover", headers=headers).status_code, 204)
+            previous_calls = len(self.requests)
+            invalid = client.post("/summaries/general", json={"start_date": DAY})
             self.assertEqual(invalid.status_code, 400)
-            self.assertFalse(self.requests)
+            self.assertEqual(len(self.requests), previous_calls)
 
             response = client.get("/summaries/articles")
             self.assertEqual(response.status_code, 200, response.json)
             self.assertEqual(response.json["summaries_generated"], 1)
 
-            period = {"start_date": DAY, "end_date": DAY}
             for path, payload in (
                 ("topic", {"topic_id": 1, **period}),
                 ("category", {"category": "Política", **period}),
@@ -537,11 +541,12 @@ class SummaryTest(unittest.TestCase):
                 ("custom", {"filters": {"categories": ["Economía"], **period}}),
             ):
                 endpoint = "/summaries/" + path
-                self.assertEqual(client.post(endpoint, json=payload).status_code, 401, endpoint)
-                response = client.post(endpoint, json=payload, headers=headers)
-                self.assertEqual(response.status_code, 200, response.json)
-                self.assertTrue(response.json["ok"])
-            response = client.post("/summaries/general", json=period, headers=headers)
+                with self.subTest(endpoint=endpoint):
+                    response = client.post(endpoint, json=payload)
+                    self.assertEqual(response.status_code, 200, response.json)
+                    self.assertTrue(response.json["ok"])
+            response = client.post("/summaries/general", json=period)
+            self.assertEqual(response.status_code, 200, response.json)
             self.assertTrue(response.json["reused"])
             self.assertEqual(response.json["gemini_requests"], 0)
 

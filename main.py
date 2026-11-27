@@ -52,15 +52,10 @@ BOLIVIA_TZ = timezone(timedelta(hours=-4))
 
 app = Flask(__name__)
 
-PROTECTED_SUMMARY_ENDPOINTS = {
-    "summary_topic_handler", "summary_category_handler",
-    "summary_general_handler", "summary_custom_handler",
-}
 
 @app.before_request
 def authorize_job():
-    protected_summary = request.endpoint in PROTECTED_SUMMARY_ENDPOINTS
-    if not protected_summary and request.endpoint not in {
+    if request.endpoint not in {
         "ingest_handler", "ingest_replies_handler", "reprocess_handler",
         "ejecutar_stance_posts_handler", "ejecutar_stance_topics_handler",
         "select_topics", "create_topics", "discover_articles_handler",
@@ -70,8 +65,6 @@ def authorize_job():
 
     expected = os.getenv("INGEST_JOB_TOKEN")
     if not expected:
-        if protected_summary:
-            return jsonify(ok=False, error="Falta configurar INGEST_JOB_TOKEN"), 503
         return None
     authorization = request.headers.get("Authorization", "")
     if not hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):
