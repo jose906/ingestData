@@ -22,7 +22,7 @@ from database import get_db_connection
 ARTICLE_LOCK = "netvora_article_summaries"
 ARTICLE_VERSION = "article-v1"
 SUMMARY_VERSION = "summary-v1"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 MAX_ATTEMPTS = 3
 STALE_MINUTES = 15
 MIN_ARTICLE_WORDS = 40
@@ -409,6 +409,8 @@ def _summarize_batch(conn, cursor, stack, deadline, model, limit, timeout, call_
             result["articles_sampled"] += saved and summary["selection_limited"]
         except PROVIDER_ERRORS as error:
             code, retry_at, stopped = _provider_error(error, attempt)
+            if stopped and isinstance(error, APIError):
+                result["gemini_http_status"] = error.code
             saved = _article_error(cursor, article_id, attempt, "FAILED", code, retry_at)
             if saved:
                 result["summaries_failed"] += 1
@@ -996,7 +998,10 @@ def _generate_summary(kind, filters, max_seconds):
                 code, retry_at, _ = _provider_error(error, attempt)
                 _set_summary_failure(cursor, summary_id, code, retry_at)
                 conn.commit()
-                return _failure(code, id=summary_id, gemini_requests=1, next_retry_at=_iso(retry_at))
+                failure = _failure(code, id=summary_id, gemini_requests=1, next_retry_at=_iso(retry_at))
+                if isinstance(error, APIError):
+                    failure["gemini_http_status"] = error.code
+                return failure
             except DataError:
                 conn.rollback()
                 _set_summary_failure(cursor, summary_id, "MYSQL_DATA_ERROR", None)

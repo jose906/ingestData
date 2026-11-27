@@ -12,9 +12,6 @@ import helper
 MARGEN_MINIMO = float(os.getenv("TOPIC_MIN_MARGIN", "0.03"))
 UMBRAL_CENTROIDE = float(os.getenv("TOPIC_CENTROID_MIN_SIMILARITY", "0.85"))
 
-MAX_TOPICS_PER_TWEET = max(1, int(os.getenv("MAX_TOPICS_PER_TWEET", "3")))
-SECONDARY_TOPIC_THRESHOLD = float(os.getenv("SECONDARY_TOPIC_THRESHOLD", "0.84"))
-
 TOPICS_ESPECIALES = [
     "__SOLO_LINK__",
     "__SALUDO__",
@@ -437,10 +434,8 @@ def classify_tweets(guardar=True):
         clasificados, pendientes = helper.clasificar_por_centroide(
             tweets_normales,
             get_topic_embeddings(),
-            lambda ids, topics: helper.cargar_referencias_topics(get_db_connection, ids, topics),
-            MARGEN_MINIMO,
-            MAX_TOPICS_PER_TWEET,
-            SECONDARY_TOPIC_THRESHOLD,
+            cargar_referencias=None,
+            margen=MARGEN_MINIMO,
         )
         asignados.extend(clasificados)
 

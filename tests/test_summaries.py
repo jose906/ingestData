@@ -275,11 +275,10 @@ class SummaryTest(unittest.TestCase):
         self.patch(summaries, "get_gemini_client", lambda _: nullcontext(SimpleNamespace(
             models=SimpleNamespace(generate_content=self.generate_content),
         )))
-        settings = patch.dict(os.environ, {
-            "GEMINI_SUMMARY_MODEL": "gemini-2.5-flash", "SUMMARY_SECONDS": "60", "SUMMARY_MAX_CALLS": "10",
-        })
+        settings = patch.dict(os.environ, {"SUMMARY_SECONDS": "60", "SUMMARY_MAX_CALLS": "10"})
         settings.start()
         self.addCleanup(settings.stop)
+        os.environ.pop("GEMINI_SUMMARY_MODEL", None)
 
     def patch(self, module, name, value):
         handle = patch.object(module, name, value)
@@ -290,7 +289,8 @@ class SummaryTest(unittest.TestCase):
         self.assertFalse(self.store.in_transaction)
         self.assertEqual(config.http_options.retry_options.attempts, 1)
         self.assertEqual(config.response_mime_type, "application/json")
-        self.assertEqual(config.thinking_config.thinking_budget, 0)
+        self.assertEqual(config.thinking_config.thinking_level.lower(), "minimal")
+        self.assertIsNone(config.thinking_config.thinking_budget)
         payload = json.loads(contents)
         self.requests.append(payload)
         if self.responses:
@@ -319,7 +319,7 @@ class SummaryTest(unittest.TestCase):
         saved = self.store.articles[2]
         self.assertEqual(saved["summary_status"], "COMPLETED")
         self.assertEqual(json.loads(saved["key_points"]), ARTICLE_REPLY["key_points"])
-        self.assertEqual(saved["summary_model"], "gemini-2.5-flash")
+        self.assertEqual(saved["summary_model"], "gemini-3.5-flash-lite")
         self.assertEqual(saved["summary_prompt_version"], summaries.ARTICLE_VERSION)
         self.assertEqual(self.requests[0]["domain"], "medio.example")
         self.assertEqual(self.requests[0]["published_at"], "2026-11-26T15:00:00")
@@ -336,16 +336,25 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(self.requests[1]["selection_limited"])
         self.assertLessEqual(len(self.requests[1]["content"]), summaries.MAX_ARTICLE_CHARS)
 
-    def test_quota_and_billing_stop_before_next_article(self):
-        for status, message, expected in (
-            (429, "RESOURCE_EXHAUSTED", "GEMINI_QUOTA"), (400, "Billing is disabled", "GEMINI_BILLING"),
+    def test_provider_configuration_quota_and_billing_stop_before_next_article(self):
+        from main import app
+
+        client = app.test_client()
+        for status, message, expected, route_status in (
+            (404, "Model not found", "GEMINI_CONFIGURATION", 503),
+            (400, "API key not valid", "GEMINI_CONFIGURATION", 503),
+            (429, "RESOURCE_EXHAUSTED", "GEMINI_QUOTA", 429),
+            (400, "Billing is disabled", "GEMINI_BILLING", 503),
         ):
-            with self.subTest(status=status):
+            with self.subTest(status=status, error=expected):
                 self.store.articles.update({2: article(2), 3: article(3)})
                 self.responses.append(failed_response(status, message))
-                result = summaries.generate_pending_article_summaries()
+                response = client.get("/summaries/articles")
+                result = response.json
+                self.assertEqual(response.status_code, route_status, result)
                 self.assertFalse(result["ok"])
                 self.assertEqual((result["gemini_requests"], result["error"]), (1, expected))
+                self.assertEqual(result["gemini_http_status"], status)
                 self.assertEqual(self.store.articles[3]["summary_attempts"], 0)
 
     def test_failure_storing_an_article_does_not_stop_batch(self):
@@ -502,21 +511,21 @@ class SummaryTest(unittest.TestCase):
 
         client = app.test_client()
         with patch.dict(os.environ, {"INGEST_JOB_TOKEN": ""}):
-            self.assertEqual(client.post("/summaries/articles").status_code, 200)
+            self.assertEqual(client.get("/summaries/articles").status_code, 200)
             self.assertEqual(client.post("/summaries/topic").status_code, 503)
             self.assertEqual(client.head("/articles/discover").status_code, 204)
 
         self.store.articles[2] = article(2)
         with patch.dict(os.environ, {"INGEST_JOB_TOKEN": "summary-test-token"}):
             headers = {"Authorization": "Bearer summary-test-token"}
-            self.assertEqual(client.get("/summaries/articles").status_code, 405)
+            self.assertEqual(client.post("/summaries/articles").status_code, 405)
             self.assertEqual(client.get("/summaries/topic", headers=headers).status_code, 405)
             self.assertEqual(client.head("/articles/discover").status_code, 401)
             invalid = client.post("/summaries/general", json={"start_date": DAY}, headers=headers)
             self.assertEqual(invalid.status_code, 400)
             self.assertFalse(self.requests)
 
-            response = client.post("/summaries/articles", json={"limit": 1})
+            response = client.get("/summaries/articles")
             self.assertEqual(response.status_code, 200, response.json)
             self.assertEqual(response.json["summaries_generated"], 1)
 
@@ -547,7 +556,7 @@ class GeminiSdkTest(unittest.TestCase):
         requests_sent = []
 
         def respond(request):
-            requests_sent.append(json.loads(request.content))
+            requests_sent.append(request)
             return transport.Response(429, json={
                 "error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Quota exhausted"},
             })
@@ -556,15 +565,21 @@ class GeminiSdkTest(unittest.TestCase):
             options = summaries._api_options(2)
             options.httpx_client = http
             with patch.dict(os.environ, {"GEMINI_API_KEY": "mock-gemini-key"}):
+                os.environ.pop("GEMINI_SUMMARY_MODEL", None)
                 with get_gemini_client(options) as client:
                     with self.assertRaises(ClientError):
-                        summaries.generate_article_summary(article(1), client=client, model="gemini-2.5-flash", timeout=2)
+                        summaries.generate_article_summary(article(1), client=client, timeout=2)
 
         self.assertEqual(len(requests_sent), 1)
-        config = requests_sent[0]["generationConfig"]
+        request = requests_sent[0]
+        self.assertTrue(request.url.path.endswith("/models/gemini-3.5-flash-lite:generateContent"))
+        config = json.loads(request.content)["generationConfig"]
         self.assertEqual(config["responseMimeType"], "application/json")
         thinking = config["thinkingConfig"]
-        self.assertEqual(thinking.get("thinkingBudget", thinking.get("thinking_budget")), 0)
+        self.assertEqual(thinking.get("thinkingLevel", thinking.get("thinking_level", "")).lower(), "minimal")
+        self.assertNotIn("thinkingBudget", thinking)
+        self.assertNotIn("thinking_budget", thinking)
+        self.assertNotIn("temperature", config)
 
 
 if __name__ == "__main__":
