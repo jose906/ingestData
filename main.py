@@ -14,11 +14,8 @@ import base64
 import json
 from selectTopics import classify_tweets
 from crearTopic import insertar_nuevos_topicos
-from scrapping import HTTP_JOB_MAX_SECONDS, register_articles, run_scraping, scrape_pending_articles
-from summaries import (
-    generate_category_summary, generate_custom_summary, generate_general_summary,
-    generate_pending_article_summaries, generate_topic_summary,
-)
+from scrapping import register_articles, run_scraping, scrape_pending_articles
+from summary_routes import summary_routes
 from stance import (
     ejecutar_stance_por_target,
     ejecutar_targets_topicos,
@@ -51,6 +48,7 @@ REQUEST_SLEEP_SECONDS = 0.2
 BOLIVIA_TZ = timezone(timedelta(hours=-4))
 
 app = Flask(__name__)
+app.register_blueprint(summary_routes)
 
 
 @app.before_request
@@ -1459,56 +1457,6 @@ def scrape_articles_handler():
 @app.route("/articles/run", methods=["GET"])
 def run_articles_handler():
     return article_job_response(run_scraping)
-
-
-def summary_job_response(job, required=(), optional=()):
-    try:
-        payload = request.get_json(silent=True) if request.get_data(cache=True) else {}
-        if not isinstance(payload, dict) or set(payload) - set(required + optional):
-            raise ValueError("Envía un objeto JSON con los parámetros del resumen")
-        missing = set(required) - set(payload)
-        if missing:
-            raise ValueError("Faltan parámetros: " + ", ".join(sorted(missing)))
-        result = job(**payload, max_seconds=HTTP_JOB_MAX_SECONDS)
-        status = 200 if result["ok"] else {
-            "BUSY": 409, "TOPIC_NOT_FOUND": 404, "NO_SOURCES": 422,
-            "GEMINI_QUOTA": 429, "GEMINI_BILLING": 503, "GEMINI_CONFIGURATION": 503,
-            "EXECUTION_LIMIT": 503, "MYSQL_DATA_ERROR": 500,
-        }.get(result["error"], 502)
-        return jsonify(result), status
-    except ValueError as error:
-        return jsonify(ok=False, error=str(error)), 400
-    except Error:
-        app.logger.exception("Error MySQL al generar resúmenes")
-        return jsonify(ok=False, error="MYSQL_ERROR"), 500
-    except Exception:
-        app.logger.exception("Falló el trabajo de resúmenes")
-        return jsonify(ok=False, error="SUMMARY_ERROR"), 500
-
-
-@app.get("/summaries/articles")
-def summary_articles_handler():
-    return summary_job_response(generate_pending_article_summaries, optional=("limit",))
-
-
-@app.post("/summaries/topic")
-def summary_topic_handler():
-    return summary_job_response(generate_topic_summary, ("topic_id",), ("start_date", "end_date"))
-
-
-@app.post("/summaries/category")
-def summary_category_handler():
-    return summary_job_response(generate_category_summary, ("category", "start_date", "end_date"))
-
-
-@app.post("/summaries/general")
-def summary_general_handler():
-    return summary_job_response(generate_general_summary, ("start_date", "end_date"))
-
-
-@app.post("/summaries/custom")
-def summary_custom_handler():
-    return summary_job_response(generate_custom_summary, ("filters",))
 
 
 if __name__ == "__main__":

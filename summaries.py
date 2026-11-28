@@ -300,6 +300,7 @@ def generate_pending_article_summaries(limit=10, *, max_seconds=None):
     ), 0)
     result.update(ok=True, model=model, errors={})
 
+    print(f"[summaries] articles etapa=mysql limit={limit}", flush=True)
     with closing(get_db_connection()) as conn, closing(conn.cursor(dictionary=True)) as cursor, ExitStack() as stack:
         if not _get_lock(cursor, ARTICLE_LOCK):
             result.update(ok=False, error="BUSY")
@@ -366,6 +367,7 @@ def _summarize_batch(conn, cursor, stack, deadline, model, limit, timeout, call_
         if result["gemini_requests"] >= call_limit:
             break
         if client is None:
+            print(f"[summaries] articles etapa=gemini modelo={model}", flush=True)
             try:
                 client = stack.enter_context(get_gemini_client(_api_options(timeout)))
             except RuntimeError:
@@ -901,6 +903,7 @@ def _generate_summary(kind, filters, max_seconds):
     start, end = _date_bounds(filters)
     scope_hash = _hash({"type": kind, "filters": filters})
 
+    print(f"[summaries] {kind} etapa=mysql", flush=True)
     with closing(get_db_connection()) as conn, closing(conn.cursor(dictionary=True)) as cursor:
         if not _get_lock(cursor, "netvora_summary_" + scope_hash[:48]):
             return _failure("BUSY")
@@ -931,6 +934,7 @@ def _generate_summary(kind, filters, max_seconds):
 
         total, sources, payload, selection = _prepare_summary(cursor, kind, filters, start, end, topic)
         conn.commit()
+        print(f"[summaries] {kind} publicaciones={total} fuentes={len(sources)}", flush=True)
         if not sources:
             return _failure("NO_SOURCES", total_tweets=total)
 
@@ -955,11 +959,12 @@ def _generate_summary(kind, filters, max_seconds):
 
         if deadline - time.monotonic() <= 1:
             return _failure("EXECUTION_LIMIT", time_limit_reached=True)
+        attempt = attempts + 1
+        print(f"[summaries] {kind} etapa=gemini modelo={model} intento={attempt}", flush=True)
         try:
             client_context = get_gemini_client(_api_options(timeout))
         except RuntimeError:
             return _failure("GEMINI_CONFIGURATION")
-        attempt = attempts + 1
         with client_context as client:
             summary_id = _claim_summary(cursor, row, kind, filters, start, end, scope_hash, input_hash, model, attempt)
             conn.commit()
