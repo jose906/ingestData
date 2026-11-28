@@ -8,6 +8,7 @@ import requests
 import sklearn
 import MLModel
 from mysql.connector import Error
+from mysql.connector.errors import ReadTimeoutError, WriteTimeoutError
 import time
 import hmac
 import base64
@@ -1390,37 +1391,16 @@ def ejecutar_stance_topics_handler():
 
 @app.route("/selectTopics", methods=["GET"])
 def select_topics():
-    lock_name = "netvora_select_topics"
-    conn = None
-    cursor = None
-    acquired = False
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT GET_LOCK(%s, 0)", (lock_name,))
-        lock_result = cursor.fetchone()[0]
-        if lock_result == 0:
-            return jsonify({
-                "ok": True,
-                "busy": True,
-                "tweets_no_asignados": 0,
-                "tweets_asignados": 0,
-            }), 200
-        if lock_result != 1:
-            raise RuntimeError("MySQL no pudo adquirir el bloqueo de tópicos")
-        acquired = True
-
-        df_no_asignados, df_asignados = classify_tweets()
+        df_no_asignados , df_asignados = classify_tweets()
         return jsonify({
             "ok": True,
             "tweets_no_asignados": len(df_no_asignados),
             "tweets_asignados": len(df_asignados),
+            "detalle": df_no_asignados.to_dict(orient="records")
         }), 200
-    except Exception:
-        app.logger.exception("Falló el trabajo de tópicos")
-        return jsonify({"ok": False, "error": "Falló el trabajo de tópicos"}), 500
-    finally:
-        close_job_connection(conn, cursor, lock_name, acquired)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
     
 @app.route("/create_topics", methods=["GET"])
 def create_topics():

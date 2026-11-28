@@ -3,7 +3,7 @@ import os
 import mysql.connector
 
 
-def get_db_connection():
+def get_db_connection(*, io_timeout=None):
     instance = os.getenv("INSTANCE_CONNECTION_NAME")
     host = os.getenv("DB_HOST")
     if not (instance or host):
@@ -16,6 +16,8 @@ def get_db_connection():
         "charset": "utf8mb4",
         "connection_timeout": 10,
     }
+    if io_timeout is not None:
+        config.update(read_timeout=io_timeout, write_timeout=io_timeout)
     if instance:
         config["unix_socket"] = f"/cloudsql/{instance}"
     else:

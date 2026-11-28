@@ -3,7 +3,7 @@ requests
 urllib3
 beautifulsoup4
 protego
-mysql-connector-python
+mysql-connector-python>=9.2
 scikit-learn==1.7.2
 joblib
 numpy
